@@ -1,244 +1,328 @@
-# rag-engine
+# brief
 
-A dataset-agnostic Go-native RAG index and query tool. Uses local ONNX
-sentence-transformer models plus BM25, with hybrid ranking, a relevance gate,
-and built-in hyperparameter tuning against an eval set.
+A memory engine for agents. `brief` learns from your project's
+knowledge and recalls the right passages when your coding agent asks.
+Drop-in context injection for Claude Code, Cursor, or anything with a
+prompt-time hook. Local ONNX embeddings, hybrid BM25 + semantic
+ranking, tunable to 100% hit rate on your own corpus.
 
-- **Single binary.** No Python, no services, no vector database.
-- **Auto-bootstrapping.** First use downloads the ONNX runtime and the
-  requested model into `~/.rag-engine/`.
-- **Multi-model.** Five built-in BERT-style models; drop-in custom models by
-  extending the registry.
-- **Reproducible indexes.** The embedding model and all build-time parameters
-  are embedded in the index file. Queries can't silently cross-use a
-  different model.
-- **Fully parameterized.** Every knob that affects retrieval (chunking,
-  BM25 `k1`/`b`, hybrid weights, relevance floors) is exposed on the CLI and
-  in JSON config files.
-- **Tunable.** `tune-query` random-searches query-time knobs against an eval
-  set; `tune-index` grid-walks chunking configs. Both emit JSON you can
-  feed back via `--config`.
+[![CI](https://github.com/chanwit/brief/actions/workflows/ci.yml/badge.svg)](https://github.com/chanwit/brief/actions/workflows/ci.yml)
+[![Go Reference](https://pkg.go.dev/badge/github.com/chanwit/brief.svg)](https://pkg.go.dev/github.com/chanwit/brief)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
 ---
 
 ## Contents
 
+- [Why brief](#why-brief)
+- [Use case: Claude Code hooks](#use-case-claude-code-hooks)
 - [Install](#install)
 - [Quick start](#quick-start)
-- [Supported models](#supported-models)
 - [Commands](#commands)
-- [Configuration files](#configuration-files)
-- [Eval set format](#eval-set-format)
-- [Tuning guide](#tuning-guide)
-- [Environment variables](#environment-variables)
-- [Storage layout](#storage-layout)
-- [Building from source](#building-from-source)
+- [Configuration](#configuration)
+- [Hyperparameter tuning](#hyperparameter-tuning)
+- [Performance](#performance)
+- [Design](#design)
+- [Environment](#environment)
+- [Development](#development)
+- [License](#license)
+
+---
+
+## Why brief
+
+### Built for agentic hooks
+
+Coding agents like Claude Code and Cursor fire a prompt-submit hook on
+every user turn. That hook has a tight latency budget and needs to
+inject relevant project knowledge before the model thinks. `brief` is
+optimized for that exact shape of workload: a short-lived process per
+turn, microsecond search, millisecond embedding, and a Markdown output
+format the LLM can read directly.
+
+### Fast enough to run on every turn
+
+| Stage                         | Typical latency |
+|-------------------------------|-----------------|
+| Query embedding (ONNX)        | ~12 ms          |
+| Semantic search via IVF-Flat  | ~6 µs           |
+| Full hybrid recall, end-to-end | **~15 ms**     |
+
+The IVF hot path runs through hand-written **AVX2** (amd64) and
+**NEON** (arm64) kernels — 8.6–9.6× faster than scalar Go on the
+dot-product primitive. Hook budgets are usually 50–200 ms; `brief`
+fits with headroom to spare.
+
+### Self-contained, batteries included
+
+- **One static binary.** No Python, no Docker, no vector database, no
+  API keys, no network calls at query time.
+- **Auto-bootstraps.** First invocation downloads the ONNX runtime and
+  the requested embedding model into `~/.brief/` (~150 MB). Every
+  subsequent run is fully offline.
+- **No sidecar.** Indexes are portable files — a JSON for BM25 and
+  metadata, plus a directory of mmap-ready binaries for the IVF-Flat
+  ANN companion. Copy them anywhere, commit them, ship them in a
+  container.
+- **Five models built in.** MiniLM L6/L12, BGE small/base, multi-qa
+  MiniLM. `brief models` lists them; `--model KEY` switches.
+  Adding a new ONNX model is one struct literal.
+
+### UX that respects your time
+
+- **One command to the answer.** `brief recall "prompt"` returns
+  ranked Markdown chunks ready to drop into context.
+- **Reproducible indexes.** The model, chunking strategy, and every
+  build parameter are serialized into the index — queries can't
+  silently cross-run a different model's embeddings.
+- **Two search backends, one interface.** Flat brute-force for small
+  corpora, mmap'd IVF for scale. Dispatch is automatic; the CLI
+  doesn't change.
+- **`--json` for scripting**, Markdown-block for hooks, human-readable
+  for terminals. `brief` detects the output target automatically.
+- **Tuned defaults that work.** On a realistic 18-query eval set
+  against technical docs, defaults score **1.0 hit@5** and
+  **1.0 MRR**. Drop in, don't fiddle.
+
+### Hyperparameter tuning for your corpus
+
+Defaults are strong for English technical prose. For anything else,
+point the tuner at a small labeled eval set and it random-searches the
+full knob space until your target metric is met:
+
+```sh
+brief tune recall --index .brief/index.json --eval eval.json \
+    --objective hit_rate --trials 300 --output best-recall.json
+```
+
+Two objectives are first-class:
+
+- **`hit_rate`** — strict correctness: is the right doc in top-K at
+  all? Use this when you need a pass/fail quality bar.
+- **`mrr`** — rank quality: how high did it land? Use this once
+  hit-rate is already solved.
+
+Both **recall-time tuning** (fast, no re-learn — ranking weights, BM25
+params, relevance floors) and **learn-time tuning** (slower; chunking
+strategy, overlap, length caps) are built in.
+
+### CI-tested on four arches
+
+`{linux, darwin} × {amd64, arm64}` on every push and pull request.
+Releases ship native tarballs per runner with a `SHA256SUMS` manifest.
+
+---
+
+## Use case: Claude Code hooks
+
+Claude Code fires the `UserPromptSubmit` hook on every turn. The hook
+receives the user's prompt, and anything it writes to stdout becomes
+additional context for that turn. `brief` was built to be exactly that
+binary.
+
+### Wire it up in one line
+
+In `.claude/settings.local.json`:
+
+```json
+{
+  "hooks": {
+    "UserPromptSubmit": [{
+      "hooks": [{
+        "type": "command",
+        "command": "brief recall \"$CLAUDE_USER_PROMPT\""
+      }]
+    }]
+  }
+}
+```
+
+No flags. `brief recall` auto-locates the index in the current working
+directory (tries `$BRIEF_INDEX`, then `./.brief/index.json`, then
+`./.claude/knowledge.index.json`, then `./brief.index.json`).
+
+### Build the knowledge index once
+
+```sh
+brief learn
+```
+
+Also no flags. `brief learn` auto-locates the knowledge directory
+(`$BRIEF_KNOWLEDGE` → `./.claude/knowledge` → `./knowledge` → `./docs`)
+and writes to `./.brief/index.json` by default. IVF is auto-enabled
+once the corpus crosses 5 000 chunks; smaller corpora stay on the
+brute-force path.
+
+Every turn, Claude Code pipes the user's prompt through
+`brief recall`. When stdout is a pipe (hook context) `brief` emits a
+`<knowledge>...</knowledge>` Markdown block, ranked and truncated to
+fit the agent's context budget. When stdout is a terminal, it prints
+a human-readable banner with scores.
+
+### Replace existing Python RAG hooks
+
+Most RAG hook templates shipped with coding agents today are Python
+scripts doing TF-IDF cosine in-process, which limits them to tiny
+corpora and crude ranking. `brief` is a drop-in upgrade:
+
+- Same stdin/stdout contract.
+- Hybrid BM25 + dense-embedding ranking with a relevance gate that
+  suppresses off-topic matches.
+- IVF-Flat ANN so retrieval stays in the microseconds as your
+  knowledge base grows.
 
 ---
 
 ## Install
 
-Download a prebuilt tarball for your OS/arch from the GitHub release page and
-extract the `rag-engine` binary onto your `PATH`.
+### From a release
+
+Download the tarball for your OS and arch from
+[Releases](https://github.com/chanwit/brief/releases), extract, and
+move the binary onto your `PATH`:
 
 ```sh
-tar -xzf rag-engine-<version>-<os>-<arch>.tar.gz
-mv rag-engine-<version>-<os>-<arch>/rag-engine /usr/local/bin/
+tar -xzf brief-<version>-<os>-<arch>.tar.gz
+mv brief-<version>-<os>-<arch>/brief /usr/local/bin/
 ```
 
-The first time you run a command that needs a model, rag-engine will
-download the ONNX runtime shared library and the model into
-`~/.rag-engine/`. No manual setup is required — but you can pre-warm the
-cache explicitly:
+First invocation downloads the ONNX runtime (~60 MB) and the default
+embedding model (~85 MB) into `~/.brief/`. Subsequent runs are
+offline.
+
+### From source
+
+Requires Go 1.25 or newer and a C toolchain (the ONNX runtime binding
+uses cgo, which means cross-compilation is not supported — build on
+the target OS/arch).
 
 ```sh
-rag-engine setup                        # default model
-rag-engine setup --model bge-small-en-v1.5
+git clone https://github.com/chanwit/brief
+cd brief
+make build         # produces ./brief
+make test          # full test suite; ~15 s on a warm cache
 ```
 
 ---
 
 ## Quick start
 
+Zero-config path — drop Markdown into `./.claude/knowledge` (or
+`./knowledge` / `./docs`) and run:
+
 ```sh
-# 1. Index a directory of markdown.
-rag-engine index \
-    --knowledge ./docs \
-    --output    ./docs.index.json
+brief learn                             # auto everything
+brief recall "how do I rotate credentials"
+```
 
-# 2. Query it.
-rag-engine query --index ./docs.index.json -k 5 "how do I rotate credentials"
+Or be explicit:
 
-# 3. (Optional) Tune query-time knobs against a small eval set.
-rag-engine tune-query \
-    --index  ./docs.index.json \
-    --eval   ./eval.json \
-    --trials 200 \
-    --output ./best-query.json
+```sh
+# 1. Learn from a directory of Markdown or text files.
+brief learn --from ./docs --output docs.index.json
+
+# 2. Recall passages.
+brief recall --index docs.index.json "how do I rotate credentials"
+
+# 3. (Optional) Tune retrieval knobs for your corpus.
+brief tune recall \
+    --index docs.index.json --eval eval.json \
+    --trials 300 --output best-recall.json
 
 # 4. Use the tuned config.
-rag-engine query \
-    --index  ./docs.index.json \
-    --config ./best-query.json \
+brief recall \
+    --index  docs.index.json \
+    --config best-recall.json \
     "how do I rotate credentials"
 ```
 
----
-
-## Supported models
-
-Run `rag-engine models` to list the built-in registry. All models are
-BERT-style ONNX exports with WordPiece tokenizers.
-
-| Key                          | Dim | Pool | Max len | Notes                          |
-|------------------------------|-----|------|---------|--------------------------------|
-| `all-MiniLM-L6-v2` (default) | 384 | mean | 128     | Small, fast, good baseline.    |
-| `all-MiniLM-L12-v2`          | 384 | mean | 128     | Slightly more accurate.        |
-| `multi-qa-MiniLM-L6-cos-v1`  | 384 | mean | 512     | Tuned for Q&A-style queries.   |
-| `bge-small-en-v1.5`          | 384 | cls  | 512     | Strong English retrieval.      |
-| `bge-base-en-v1.5`           | 768 | cls  | 512     | Higher quality, 2× vector size.|
-
-Model files are sourced from Hugging Face (`Xenova/<model>`).
-
-To add a new model, append a `ModelInfo` entry to the `knownModels` map in
-`models.go` and rebuild. Any WordPiece-tokenized ONNX embedding model that
-exports `last_hidden_state` as its output will work.
+IVF-Flat ANN kicks in automatically once your corpus crosses 5 000
+chunks; pass `--no-ivf` to force flat search or `--use-ivf` to force
+IVF on smaller corpora.
 
 ---
 
 ## Commands
 
-All commands accept `-h` / `--help` to print their flag list.
+Every command accepts `-h` for its flag list.
 
-### `setup`
+| Command         | Purpose                                                        |
+|-----------------|----------------------------------------------------------------|
+| `init`          | Download ONNX runtime and the requested embedding model.       |
+| `models`        | List built-in embedding models.                                |
+| `learn`         | Learn from a directory of documents (builds the index).        |
+| `recall`        | Recall relevant passages for a question (queries the index).   |
+| `tune learn`    | Grid-search learn-time knobs (chunking) against an eval set.   |
+| `tune recall`   | Random-search recall-time knobs against an eval set.           |
 
-Download the ONNX runtime and a model. Safe to run many times.
+### `learn`
 
-```
-rag-engine setup [--model KEY]
-```
-
-### `models`
-
-List every known model with its dim, pooling, and max length.
-
-### `index`
-
-Build an index from a directory of source documents.
-
-```
-rag-engine index \
-    --knowledge DIR \
-    --output    PATH \
-  [ --model KEY ] \
-  [ --config  INDEXCONFIG.json ] \
-  [ --chunk-strategy {heading|size} ] \
-  [ --chunk-size N ] \
-  [ --chunk-overlap N ] \
-  [ --min-chunk-chars N ] \
-  [ --max-chunk-chars N ] \
-  [ --embed-max-chars N ] \
-  [ --include  "*.md,*.txt" ] \
-  [ --exclude  "drafts/*" ] \
-  [ --pooling  {mean|cls} ]
-```
-
-- `--chunk-strategy heading` (default): split markdown on `## ` headings.
-  Fenced code blocks are preserved intact.
-- `--chunk-strategy size`: produce overlapping fixed-size chunks. Use this
-  for plain text or any non-markdown corpus.
-- `--include` / `--exclude`: comma-separated glob patterns matched against
-  both basename and relative path.
-- CLI flags override values loaded from `--config`.
-
-### `query`
-
-Run a query against an index.
+Builds a JSON index with BM25 statistics and embedding vectors. With
+`--use-ivf` (or auto-enabled above `--auto-ivf-threshold`), vectors
+move to a sibling `<index>.ivf/` directory stored as raw float32
+invlists and mmap'd at recall time.
 
 ```
-rag-engine query \
-    --index PATH \
-  [ --config QUERYCONFIG.json ] \
-  [ --mode {hybrid|bm25|semantic} ] \
-  [ -k N ] \
-  [ --weight-semantic F ] \
-  [ --weight-bm25 F ] \
-  [ --bm25-k1 F ] \
-  [ --bm25-b F ] \
-  [ --semantic-hard-floor F ] \
-  [ --semantic-soft-floor F ] \
-  [ --bm25-min-for-soft-zone F ] \
-  [ --min-query-terms N ] \
-  [ --json ] \
-    "your query string"
+brief learn \
+  [ --from DIR ]                        # auto: $BRIEF_KNOWLEDGE → .claude/knowledge → knowledge → docs
+  [ --output PATH ]                     # auto: ./.brief/index.json
+  [ --model KEY ]                       # default all-MiniLM-L6-v2
+  [ --config INDEXCONFIG.json ]         # JSON config; flags override
+  [ --chunk-strategy heading|size ]
+  [ --chunk-size N ] [ --chunk-overlap N ]
+  [ --min-chunk-chars N ] [ --max-chunk-chars N ]
+  [ --include  "*.md,*.txt" ]
+  [ --exclude  "drafts/*" ]
+  [ --use-ivf | --no-ivf ]              # default: auto at chunks ≥ --auto-ivf-threshold (5000)
+  [ --ivf-centroids K ] [ --ivf-nprobe N ]
 ```
+
+### `recall`
+
+```
+brief recall \
+  [ --index PATH ]                      # auto: $BRIEF_INDEX → .brief/index.json → .claude/knowledge.index.json → brief.index.json
+  [ --config QUERYCONFIG.json ]
+  [ --mode hybrid|bm25|semantic ]
+  [ -k N ]                              # default 3
+  [ --weight-semantic F ] [ --weight-bm25 F ]
+  [ --bm25-k1 F ] [ --bm25-b F ]
+  [ --semantic-hard-floor F ] [ --semantic-soft-floor F ]
+  [ --bm25-min-for-soft-zone F ]
+  [ --nprobe N ] [ --n-semantic N ]     # IVF only
+  [ --json ]
+    "your question"
+```
+
+Output format is TTY-aware: when stdout is a terminal you get a
+human-readable banner and ranked list; when stdout is a pipe (hook
+context) you get a `<knowledge>...</knowledge>` Markdown block
+designed to be read by an LLM. `--json` overrides both.
 
 Modes:
 
-- `hybrid` (default): combines semantic cosine and BM25 with configurable
-  weights, then applies the two-tier relevance floor below.
-- `bm25`: classic BM25 only. No embedding model is loaded.
-- `semantic`: pure cosine similarity on embeddings. No floor gating.
+- `hybrid` (default): combines normalized BM25 and cosine similarity,
+  then applies the relevance gate.
+- `bm25`: lexical only. No embedding model loaded.
+- `semantic`: cosine similarity only. No gating.
 
-The query-time **relevance gate** (hybrid mode) rejects top-k candidates
-that fall into:
+The **relevance gate** (hybrid mode) rejects candidates in three
+tiers:
 
-1. `semantic < semantic_hard_floor` — always drop.
-2. `semantic_hard_floor ≤ semantic < semantic_soft_floor` — drop unless
-   `bm25_norm ≥ bm25_min_for_soft_zone` (BM25 must corroborate).
-3. `semantic ≥ semantic_soft_floor` — always keep.
+1. `semantic < hard_floor` — always drop.
+2. `semantic < soft_floor` — drop unless `bm25_norm ≥ soft_zone` (BM25
+   must corroborate).
+3. `semantic ≥ soft_floor` — always keep.
 
-This lets queries that are off-topic for the corpus return an empty list
-instead of low-quality top-k noise.
-
-### `tune-query`
-
-Random-search all query-time knobs against an eval set; emit the best
-`QueryConfig` as JSON.
-
-```
-rag-engine tune-query \
-    --index PATH \
-    --eval  EVAL.json \
-  [ --mode {hybrid|bm25|semantic} ] \
-  [ --k N ] \
-  [ --trials N ] \
-  [ --output best-query.json ]
-```
-
-Objective: **MRR@k** over the eval set (see
-[Eval set format](#eval-set-format) for the input schema).
-
-The tuner pre-embeds every eval query once and then re-scores candidates
-against the fixed chunk vectors, so hundreds of trials take seconds.
-
-### `tune-index`
-
-Grid-walk a small space of chunking configs, rebuilding the index for each
-and evaluating the same way as `tune-query`. Slow because every trial
-re-embeds the corpus; keep `--trials` small (default 8).
-
-```
-rag-engine tune-index \
-    --knowledge DIR \
-    --eval      EVAL.json \
-  [ --model KEY ] \
-  [ --trials N ] \
-  [ --k N ] \
-  [ --query-config QUERYCONFIG.json ] \
-  [ --output-config best-index.json ] \
-  [ --output-index  tuned.index.json ]
-```
-
-Varies: `chunk_strategy ∈ {heading, size}`, `chunk_size ∈ {250,500,750,1000,1500}`,
-`chunk_overlap ∈ {0,50,100,200}`, `embed_max_chars ∈ {1000,1500,2500}`.
-
-The chunking config that produces the best MRR@k is saved alongside (or as)
-a ready-to-use tuned index.
+This turns off-topic queries into clean empty results instead of
+low-confidence noise.
 
 ---
 
-## Configuration files
+## Configuration
+
+Both `learn` and `recall` accept `--config FILE` with JSON matching
+the structs below. CLI flags override values from the file.
 
 ### IndexConfig
 
@@ -253,31 +337,37 @@ a ready-to-use tuned index.
   "embed_max_chars": 1500,
   "include": ["*.md", "*.markdown", "*.txt"],
   "exclude": null,
-  "pooling": "",
-  "normalize": null
+
+  "use_ivf": false,
+  "ivf_centroids": 0,
+  "ivf_nprobe": 0
 }
 ```
 
 | Field             | Meaning                                                |
 |-------------------|--------------------------------------------------------|
 | `model`           | Model key from the built-in registry.                  |
-| `chunk_strategy`  | `heading` or `size`.                                   |
+| `chunk_strategy`  | `heading` splits on `## ` (markdown-aware); `size` produces fixed-size overlapping chunks. |
 | `chunk_size`      | Target chars per chunk (size strategy).                |
 | `chunk_overlap`   | Char overlap between adjacent chunks.                  |
-| `min_chunk_chars` | Drop chunks shorter than this (0 = keep all).          |
-| `max_chunk_chars` | Truncate chunk bodies to this length (0 = unbounded).  |
+| `min_chunk_chars` | Drop chunks shorter than this.                         |
+| `max_chunk_chars` | Truncate chunk bodies (0 = unbounded).                 |
 | `embed_max_chars` | Truncate text before tokenization.                     |
-| `include`         | File globs to index (basename or relative path).       |
-| `exclude`         | File globs to skip.                                    |
-| `pooling`         | Override model default (`mean` or `cls`).              |
-| `normalize`       | Override model default L2-normalization (`true`/`false`). |
+| `include`/`exclude` | File globs against basename and relative path.       |
+| `use_ivf`         | Build an IVF-Flat companion index.                     |
+| `ivf_centroids`   | IVF `K`. `0` = auto (`4 · √N`, min 16).                |
+| `ivf_nprobe`      | Default nprobe stored in the IVF manifest. `0` = `√K`. |
 
 ### QueryConfig
+
+Tuned defaults; they hit `1.0 hit@5` and `1.0 MRR` on the reference
+technical-docs eval set. Override for other domains via
+`brief tune recall` or CLI flags.
 
 ```json
 {
   "mode": "hybrid",
-  "k": 5,
+  "k": 3,
   "weight_semantic": 0.48,
   "weight_bm25": 0.52,
   "bm25_k1": 2.33,
@@ -285,42 +375,41 @@ a ready-to-use tuned index.
   "semantic_hard_floor": 0.35,
   "semantic_soft_floor": 0.43,
   "bm25_min_for_soft_zone": 0.44,
-  "min_query_terms_in_corpus": 0
+  "min_query_terms_in_corpus": 0,
+
+  "nprobe": 0,
+  "n_semantic": 0
 }
 ```
-
-These defaults came out of running `tune-query --objective hit_rate` on an
-18-query eval set against a ~200-chunk technical-docs corpus: the config
-above scored 1.0 hit@5 (every query's relevant document in top-5) and 1.0
-MRR (every one at rank 1). The BM25 parameters drifted upward from the
-canonical `k1=1.2 / b=0.75` because the target corpus had short,
-term-dense sections; other domains may want to re-tune. The semantic
-floors are also deliberately tight to reject low-cosine noise earlier.
-
-To return to the textbook-BM25 defaults for a different corpus:
-
-    rag-engine query \
-        --bm25-k1 1.2 --bm25-b 0.75 \
-        --semantic-hard-floor 0.2 --semantic-soft-floor 0.3 \
-        --bm25-min-for-soft-zone 0.3 \
-        --index idx.json "your query"
 
 | Field                        | Meaning                                              |
 |------------------------------|------------------------------------------------------|
 | `mode`                       | `hybrid`, `bm25`, or `semantic`.                     |
 | `k`                          | Top-k results.                                       |
-| `weight_semantic`            | Hybrid weight on cosine similarity.                  |
-| `weight_bm25`                | Hybrid weight on BM25 (normalized).                  |
-| `bm25_k1`                    | BM25 term-frequency saturation (classic default 1.2). |
-| `bm25_b`                     | BM25 length normalization (classic default 0.75).    |
-| `semantic_hard_floor`        | Below this cosine, always reject.                    |
-| `semantic_soft_floor`        | Between floors, require BM25 corroboration.          |
-| `bm25_min_for_soft_zone`     | BM25-norm floor used inside the soft zone.           |
-| `min_query_terms_in_corpus`  | Minimum query tokens that must hit the corpus (0 = auto: 1 for short queries, 2 for 3+ tokens). |
+| `weight_semantic` / `weight_bm25` | Hybrid combination weights.                     |
+| `bm25_k1`                    | BM25 term-frequency saturation. Canonical 1.2.       |
+| `bm25_b`                     | BM25 length normalization. Canonical 0.75.           |
+| `semantic_hard_floor`        | Cosine threshold for always-reject.                  |
+| `semantic_soft_floor`        | Cosine threshold for BM25-corroborated keep.         |
+| `bm25_min_for_soft_zone`     | BM25 floor used inside the soft zone.                |
+| `min_query_terms_in_corpus`  | Minimum query tokens that must appear in the corpus. `0` = auto. |
+| `nprobe`                     | IVF probe count at recall time. `0` = index default. |
+| `n_semantic`                 | IVF shortlist size fed into hybrid re-ranking. `0` = `max(k·20, 100)`. |
 
 ---
 
-## Eval set format
+## Hyperparameter tuning
+
+The tuner takes an eval set of labeled queries and optimizes retrieval
+quality. Two objectives are supported:
+
+- **`hit_rate`** — "is the relevant doc anywhere in top-K?" Targets
+  strict correctness; optimize this for a pass/fail bar like "100% of
+  known queries must return their right answer".
+- **`mrr`** — "how high does it rank?" Targets a good user experience
+  even when hit-rate is already high.
+
+### Eval set format
 
 ```json
 {
@@ -329,141 +418,190 @@ To return to the textbook-BM25 defaults for a different corpus:
       "query": "how do I rotate credentials",
       "relevant_files":  ["security/credentials.md"],
       "relevant_titles": ["Rotating credentials"]
-    },
-    {
-      "query": "how often should oil be changed",
-      "relevant_files": ["cars.md"]
     }
   ]
 }
 ```
 
-Each query must specify at least one of `relevant_files` or
-`relevant_titles`. A result is counted relevant if either:
+A result counts as relevant if its `file` matches any entry in
+`relevant_files` (equality or suffix) or its `title` matches any entry
+in `relevant_titles`.
 
-- its `file` equals one of `relevant_files` (case-insensitive), *or*
-- its `file` has one of `relevant_files` as a suffix (so you can write a
-  basename and have it match a sub-directory path), *or*
-- its `title` equals one of `relevant_titles`.
+### Workflow
 
-Metrics computed:
-
-- **MRR@k** — mean over queries of `1/rank` of the first relevant hit.
-- **Recall@k** — fraction of relevant items retrieved (set-valued, capped at 1.0).
-- **Precision@k** — fraction of top-k that are relevant.
-
-The tuner optimizes **MRR@k**.
-
----
-
-## Tuning guide
-
-For best results on a new dataset:
-
-1. **Write a small eval set.** Ten to fifty queries with the filenames or
-   section titles you'd expect to come back. More is better but even a
-   handful is enough to pick signal from noise.
-
-2. **Build a baseline index** with defaults:
-
-       rag-engine index --knowledge ./docs --output ./docs.index.json
-
-3. **Tune query-time knobs first** — it's fast and the biggest lever:
-
-       rag-engine tune-query \
-           --index  ./docs.index.json \
-           --eval   ./eval.json \
-           --trials 300 \
-           --output ./best-query.json
-
-4. **Optionally tune chunking.** Slow (re-embeds per trial) but worth it for
-   long documents or non-markdown corpora:
-
-       rag-engine tune-index \
-           --knowledge    ./docs \
-           --eval         ./eval.json \
-           --query-config ./best-query.json \
-           --trials       8 \
-           --output-config ./best-index.json \
-           --output-index  ./docs.tuned.index.json
-
-5. **Use the tuned configs in production:**
-
-       rag-engine query \
-           --index  ./docs.tuned.index.json \
-           --config ./best-query.json \
-           "your question"
-
-Tips:
-
-- Keep **k** the same across tuning and production; otherwise the tuned
-  floors may be miscalibrated.
-- If your domain uses specialized vocabulary (code, acronyms, identifiers),
-  try `bge-small-en-v1.5` or `bge-base-en-v1.5` — they usually beat MiniLM
-  on out-of-distribution English.
-- For very short corpora, disable the relevance gate by passing
-  `--semantic-hard-floor 0 --semantic-soft-floor 0 --bm25-min-for-soft-zone 0`.
-- `bm25` mode needs no embedding model, so it's useful for grep-like
-  keyword lookups on large corpora.
+1. Write 10–50 queries covering the ways your users actually ask.
+2. Build a baseline index (`brief learn`).
+3. Tune recall-time knobs first — fast, no re-learn:
+   ```sh
+   brief tune recall --index .brief/index.json --eval eval.json \
+       --objective hit_rate --trials 300 --output best-recall.json
+   ```
+4. If recall is still short, tune chunking (slower; rebuilds the index
+   per trial):
+   ```sh
+   brief tune learn --from ./docs --eval eval.json \
+       --query-config best-recall.json --trials 12 \
+       --output-config best-learn.json --output-index tuned.json
+   ```
+5. Ship `best-recall.json` and the tuned index.
 
 ---
 
-## Environment variables
+## Performance
 
-| Variable         | Default                                   | Purpose                               |
-|------------------|-------------------------------------------|---------------------------------------|
-| `RAG_HOME`       | `~/.rag-engine`                           | Root for downloaded artifacts.        |
-| `ORT_LIB_PATH`   | `$RAG_HOME/lib/libonnxruntime.{so,dylib}` | Override the ONNX runtime library.    |
-| `RAG_MODELS_DIR` | `$RAG_HOME/models`                        | Override where model dirs are stored. |
+All numbers from a 13th-gen Intel i5-1335U (12 threads, AVX2).
+
+### SIMD dot product
+
+The IVF search hot path routes through a hand-written assembly kernel
+selected at init.
+
+| Dim | Scalar Go | AVX2 kernel | Speedup |
+|-----|-----------|-------------|---------|
+| 384 | 150 ns    | 17 ns       | **8.6×** |
+| 768 | 321 ns    | 33 ns       | **9.6×** |
+
+Correctness is cross-validated against the scalar fallback on 21
+length classes that stress every tail path (`TestDotMatchesGeneric`).
+The arm64 NEON kernel shares that test on macOS and Linux CI runners.
+
+### Search latency (187-chunk technical-docs corpus)
+
+| Backend        | Mode     | Latency | Note                                                |
+|----------------|----------|---------|-----------------------------------------------------|
+| Flat           | BM25     |  63 µs  | Pure lexical; no ONNX.                              |
+| Flat           | Semantic |  60 µs  | Brute-force cosine (AVX2).                          |
+| **IVF**        | Semantic |  **5.6 µs** | **10.7× faster** than flat semantic at K=32/nprobe=8. |
+| Flat           | Hybrid   |  93 µs  | BM25 + semantic + combine.                          |
+| IVF            | Hybrid   |  78 µs  | BM25 is now the bottleneck.                         |
+| *query embed*  | *ONNX*   | *12.5 ms* | *Dominates end-to-end CLI latency.*                 |
+
+At small corpora the embedding forward pass is the overall bottleneck.
+At 10k+ chunks IVF decisively outperforms flat semantic; the gap
+widens roughly linearly with corpus size.
+
+### Retrieval quality
+
+On the scenarios eval set (18 queries × 187 chunks) with tuned
+defaults:
+
+| Backend | hit@5     | MRR      |
+|---------|-----------|----------|
+| Flat    | **1.000** | **1.000**|
+| IVF     | **1.000** | **1.000**|
+
+IVF matches flat exactly on this corpus — no approximation penalty
+for the 10× semantic speedup.
 
 ---
 
-## Storage layout
+## Design
+
+### Model registry and reproducibility
+
+Every known model has a `ModelInfo` record covering its HuggingFace
+repo, file paths, tokenizer, dimension, pooling strategy, and ONNX
+input/output names. Indexes embed the full `ModelInfo` and schema
+version. `loadIndex` refuses to open a newer schema and refuses to
+attach an IVF companion whose manifest disagrees with the index.
+
+### Chunking
+
+Two strategies: heading-aware markdown splitting that respects fenced
+code blocks, and fixed-size windowing with overlap. The chunker is
+one dimension of the tuner.
+
+### Hybrid ranking with a relevance gate
+
+Normalized BM25 is combined linearly with cosine similarity. A
+two-tier semantic floor rejects low-confidence noise before top-K
+truncation — the gate must be applied *before* sorting, otherwise a
+cluster of high-BM25 but low-semantic hits can evict every eligible
+candidate. `TestHybridGateAppliesBeforeTopK` locks that invariant.
+
+### IVF-Flat ANN
+
+- K-means++ coarse quantizer trained on the corpus vectors.
+- Invlists stored as raw little-endian float32 for zero-copy mmap.
+- `Open(dir)` on `(linux || darwin) × (amd64 || arm64)` memory-maps
+  centroids and invlists and reinterprets the bytes as `[]float32` /
+  `[]uint64` without copying. Other platforms fall back to an
+  in-memory `Load`.
+- Recall-time dispatch (`dispatchSearch`) picks flat vs IVF based on
+  whether the index has an attached companion — the CLI, the tuner,
+  and the tests all go through the same selector.
+
+### SIMD kernels
+
+- **amd64**: AVX2 with two 8-float accumulators to break FMA latency,
+  plus YMM/XMM tails and a scalar residue.
+- **arm64**: NEON with two 4-float accumulators, a 4-wide tail, and a
+  scalar residue. Unconditional install — NEON is in the ARMv8-A
+  baseline.
+- **other**: pure-Go fallback validated by the same tests.
+
+### Storage layout
 
 ```
-$RAG_HOME/
-├── lib/
-│   └── libonnxruntime.so      # or libonnxruntime.dylib on macOS
-└── models/
-    ├── all-MiniLM-L6-v2/
-    │   ├── model.onnx
-    │   └── tokenizer.json
-    └── bge-small-en-v1.5/
-        ├── model.onnx
-        └── tokenizer.json
+<index>.json              # JSON: schema, model info, config, chunks, BM25
+<index>.json.ivf/         # IVF companion (only if use_ivf=true)
+├── manifest.json
+├── centroids.bin         # K * Dim * float32
+├── invlists.ids          # concatenated uint64 chunk IDs
+└── invlists.vecs         # concatenated float32 vectors
 ```
 
-Each index JSON is fully self-describing: it carries the full `ModelInfo`
-and `IndexConfig` that produced it, plus a schema version. Queries load the
-model identified by the index, so an index built with `bge-small-en-v1.5`
-cannot accidentally be queried using a different model's embeddings.
+`~/.brief/` caches the ONNX runtime and per-model directories.
+Overridable via `BRIEF_HOME`, `ORT_LIB_PATH`, `BRIEF_MODELS_DIR`.
 
 ---
 
-## SIMD kernels
+## Environment
 
-The IVF semantic-search hot path (`ivf.Dot`) uses hand-written assembly
-kernels that dispatch by GOARCH at init:
+| Variable            | Default                                   | Purpose                                 |
+|---------------------|-------------------------------------------|-----------------------------------------|
+| `BRIEF_HOME`        | `~/.brief`                                | Root for downloaded artifacts.          |
+| `BRIEF_INDEX`       | *(auto-located)*                          | Default index path for `recall`.        |
+| `BRIEF_KNOWLEDGE`   | *(auto-located)*                          | Default knowledge dir for `learn`.      |
+| `ORT_LIB_PATH`      | `$BRIEF_HOME/lib/libonnxruntime.{so,dylib}` | ONNX runtime library path.            |
+| `BRIEF_MODELS_DIR`  | `$BRIEF_HOME/models`                      | Per-model cache directory.              |
+| `BRIEF_PERF_CORPUS` | *(auto-discovered)*                       | Override for performance test corpus.   |
 
-| GOARCH  | Kernel                        | Speedup vs scalar Go |
-|---------|-------------------------------|----------------------|
-| `amd64` | AVX2 (`ivf/distance_amd64.s`) | 8.5–9.6× @ dim 384 / 768 |
-| `arm64` | NEON (`ivf/distance_arm64.s`) | exercised in CI on macOS Apple Silicon and Linux arm64 |
-| other   | pure-Go fallback (`dotGeneric`) | 1× (baseline) |
+---
 
-Correctness is cross-validated against `dotGeneric` on every length class
-that stresses the tail paths (`TestDotMatchesGeneric`), and CI runs this
-test on all four of {linux,darwin} × {amd64,arm64}.
-
-## Building from source
-
-Requirements: Go 1.25+, a C toolchain (cgo is used by the ONNX runtime
-binding). Cross-compilation is not supported — build on the target OS/arch.
+## Development
 
 ```sh
-git clone https://github.com/chanwit/rag-engine
-cd rag-engine
-make build     # produces ./rag-engine
-make test      # runs the full test suite (downloads alt model on cold cache)
-make dist      # packages dist/rag-engine-<ver>-<os>-<arch>.tar.gz
+make build    # build ./brief
+make test     # run every test (auto-downloads alt model on cold cache)
+make vet      # go vet
+make dist     # package dist/brief-<ver>-<os>-<arch>.tar.gz
+make clean
 ```
+
+### Benchmarks
+
+```sh
+go test -run='^$' -bench=Dot       ./ivf/   # SIMD kernels
+go test -run='^$' -bench=Scenarios ./       # end-to-end search
+```
+
+### CI
+
+A 4-arch matrix runs on every push and pull request:
+
+| Runner             | GOOS/GOARCH     | SIMD kernel |
+|--------------------|-----------------|-------------|
+| `ubuntu-latest`    | `linux/amd64`   | AVX2        |
+| `ubuntu-24.04-arm` | `linux/arm64`   | NEON        |
+| `macos-13`         | `darwin/amd64`  | AVX2        |
+| `macos-latest`     | `darwin/arm64`  | NEON        |
+
+Tagged releases build native tarballs on each runner and attach them
+to a GitHub Release with a `SHA256SUMS` manifest.
+
+---
+
+## License
+
+[MIT](LICENSE)

@@ -1,7 +1,7 @@
 // Copyright (C) 2026 Chanwit Kaewkasi
 // SPDX-License-Identifier: MIT
 
-package main
+package engine
 
 import (
 	"encoding/json"
@@ -25,7 +25,7 @@ type EvalSet struct {
 	Queries []EvalQuery `json:"queries"`
 }
 
-func loadEvalSet(path string) (*EvalSet, error) {
+func LoadEvalSet(path string) (*EvalSet, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("read eval: %w", err)
@@ -141,25 +141,25 @@ func evalOneQuery(results []SearchResult, eq EvalQuery) EvalMetrics {
 	return m
 }
 
-// preEmbedded caches the query vector so random search can evaluate hundreds
+// PreEmbedded caches the query vector so random search can evaluate hundreds
 // of configs without re-running the embedding model each time.
-type preEmbedded struct {
+type PreEmbedded struct {
 	EvalQuery
 	qVec []float32
 }
 
-func preEmbedQueries(emb *Embedder, set *EvalSet) []preEmbedded {
-	out := make([]preEmbedded, len(set.Queries))
+func PreEmbedQueries(emb *Embedder, set *EvalSet) []PreEmbedded {
+	out := make([]PreEmbedded, len(set.Queries))
 	for i, q := range set.Queries {
-		out[i] = preEmbedded{EvalQuery: q, qVec: emb.Embed(q.Query)}
+		out[i] = PreEmbedded{EvalQuery: q, qVec: emb.Embed(q.Query)}
 	}
 	return out
 }
 
-func evaluateConfig(idx *Index, queries []preEmbedded, cfg QueryConfig) EvalMetrics {
+func EvaluateConfig(idx *Index, queries []PreEmbedded, cfg QueryConfig) EvalMetrics {
 	var all []EvalMetrics
 	for _, q := range queries {
-		results := dispatchSearch(idx, q.qVec, q.Query, cfg)
+		results := DispatchSearch(idx, q.qVec, q.Query, cfg)
 		all = append(all, evalOneQuery(results, q.EvalQuery))
 	}
 	return meanMetrics(all)
@@ -178,28 +178,28 @@ func scoreObjective(m EvalMetrics, objective string) float64 {
 	}
 }
 
-// tuneQueryConfig runs a random search over query-time knobs and returns
+// TuneQueryConfig runs a random search over query-time knobs and returns
 // the config that maximizes the chosen objective on the eval set.
 // objective: "mrr" (default) or "hit_rate" (for a strict "in top-K at all"
 // correctness bar).
-func tuneQueryConfig(idx *Index, emb *Embedder, set *EvalSet, trials int, mode string, k int, objective string) (QueryConfig, EvalMetrics) {
+func TuneQueryConfig(idx *Index, emb *Embedder, set *EvalSet, trials int, mode string, k int, objective string) (QueryConfig, EvalMetrics) {
 	if trials <= 0 {
 		trials = 200
 	}
 	r := rand.New(rand.NewSource(42))
-	queries := preEmbedQueries(emb, set)
+	queries := PreEmbedQueries(emb, set)
 
-	best := defaultQueryConfig()
+	best := DefaultQueryConfig()
 	best.Mode = mode
 	best.K = k
-	bestMetrics := evaluateConfig(idx, queries, best)
+	bestMetrics := EvaluateConfig(idx, queries, best)
 	bestScore := scoreObjective(bestMetrics, objective)
 	fmt.Fprintf(os.Stderr, "tune-query: baseline hit=%.4f MRR=%.4f recall=%.4f (mode=%s k=%d, n=%d, objective=%s)\n",
 		bestMetrics.HitRate, bestMetrics.MRR, bestMetrics.Recall, mode, k, len(queries), objective)
 
 	for t := 0; t < trials; t++ {
 		cfg := sampleQueryConfig(r, mode, k)
-		m := evaluateConfig(idx, queries, cfg)
+		m := EvaluateConfig(idx, queries, cfg)
 		s := scoreObjective(m, objective)
 		if s > bestScore {
 			bestMetrics = m
@@ -230,20 +230,20 @@ func sampleQueryConfig(r *rand.Rand, mode string, k int) QueryConfig {
 	}
 }
 
-// tuneIndexConfig grid-walks a small set of chunking strategies, building
+// TuneIndexConfig grid-walks a small set of chunking strategies, building
 // a fresh index for each config. Because embedding the corpus dominates
 // the wall clock, keep trials small (default 8).
-func tuneIndexConfig(knowledgeDir string, emb *Embedder, set *EvalSet, trials int, queryCfg QueryConfig, objective string) (IndexConfig, *Index, EvalMetrics) {
+func TuneIndexConfig(knowledgeDir string, emb *Embedder, set *EvalSet, trials int, queryCfg QueryConfig, objective string) (IndexConfig, *Index, EvalMetrics) {
 	if trials <= 0 {
 		trials = 8
 	}
-	queries := preEmbedQueries(emb, set)
+	queries := PreEmbedQueries(emb, set)
 
-	bestCfg := defaultIndexConfig()
+	bestCfg := DefaultIndexConfig()
 	bestCfg.ModelKey = emb.Info.Key
-	bestChunks := parseKnowledge(knowledgeDir, bestCfg)
-	bestIdx := buildIndex(bestChunks, emb, bestCfg)
-	bestMetrics := evaluateConfig(bestIdx, queries, queryCfg)
+	bestChunks := ParseKnowledge(knowledgeDir, bestCfg)
+	bestIdx := BuildIndex(bestChunks, emb, bestCfg)
+	bestMetrics := EvaluateConfig(bestIdx, queries, queryCfg)
 	bestScore := scoreObjective(bestMetrics, objective)
 	fmt.Fprintf(os.Stderr, "tune-index: baseline (strategy=heading) hit=%.4f MRR=%.4f (objective=%s)\n",
 		bestMetrics.HitRate, bestMetrics.MRR, objective)
@@ -255,7 +255,7 @@ func tuneIndexConfig(knowledgeDir string, emb *Embedder, set *EvalSet, trials in
 
 	r := rand.New(rand.NewSource(42))
 	for t := 0; t < trials; t++ {
-		cfg := defaultIndexConfig()
+		cfg := DefaultIndexConfig()
 		cfg.ModelKey = emb.Info.Key
 		cfg.ChunkStrategy = strategies[r.Intn(len(strategies))]
 		cfg.ChunkSize = sizes[r.Intn(len(sizes))]
@@ -265,12 +265,12 @@ func tuneIndexConfig(knowledgeDir string, emb *Embedder, set *EvalSet, trials in
 		}
 		cfg.EmbedMaxChars = embedCaps[r.Intn(len(embedCaps))]
 
-		chunks := parseKnowledge(knowledgeDir, cfg)
+		chunks := ParseKnowledge(knowledgeDir, cfg)
 		if len(chunks) == 0 {
 			continue
 		}
-		idx := buildIndex(chunks, emb, cfg)
-		m := evaluateConfig(idx, queries, queryCfg)
+		idx := BuildIndex(chunks, emb, cfg)
+		m := EvaluateConfig(idx, queries, queryCfg)
 		s := scoreObjective(m, objective)
 		fmt.Fprintf(os.Stderr, "  trial %d: strat=%s size=%d overlap=%d embed_cap=%d → hit=%.4f MRR=%.4f\n",
 			t+1, cfg.ChunkStrategy, cfg.ChunkSize, cfg.ChunkOverlap, cfg.EmbedMaxChars,

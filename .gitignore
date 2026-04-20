@@ -1,5 +1,6 @@
-/rag-engine
+/brief
 /dist/
 /index.json
+/.brief/
 *.onnx
 .memsearch/

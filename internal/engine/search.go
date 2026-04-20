@@ -1,14 +1,15 @@
 // Copyright (C) 2026 Chanwit Kaewkasi
 // SPDX-License-Identifier: MIT
 
-package main
+package engine
 
 import (
+	"fmt"
 	"math"
 	"sort"
 	"strings"
 
-	"github.com/chanwit/rag-engine/ivf"
+	"github.com/chanwit/brief/ivf"
 )
 
 // SearchResult is a query hit.
@@ -39,7 +40,7 @@ func cosineSim(a, b []float32) float64 {
 	return dot
 }
 
-func searchSemantic(idx *Index, queryVec []float32, topK int) []SearchResult {
+func SearchSemantic(idx *Index, queryVec []float32, topK int) []SearchResult {
 	type scored struct {
 		score float64
 		idx   int
@@ -103,7 +104,7 @@ func bm25ChunkScore(idx *Index, queryTerms []string, chunk *Chunk, k1, b float64
 	return score
 }
 
-func searchBM25(idx *Index, query string, cfg QueryConfig) []SearchResult {
+func SearchBM25(idx *Index, query string, cfg QueryConfig) []SearchResult {
 	queryTerms := bm25Tokenize(query)
 	k1, b := cfg.BM25K1, cfg.BM25B
 	topK := cfg.K
@@ -136,7 +137,7 @@ func searchBM25(idx *Index, query string, cfg QueryConfig) []SearchResult {
 
 // ---------- hybrid ----------
 
-func searchHybrid(idx *Index, queryVec []float32, query string, cfg QueryConfig) []SearchResult {
+func SearchHybrid(idx *Index, queryVec []float32, query string, cfg QueryConfig) []SearchResult {
 	queryTerms := bm25Tokenize(query)
 
 	// Domain relevance gate.
@@ -234,12 +235,12 @@ func autoNSemantic(topK int) int {
 	return n
 }
 
-// searchSemanticIVF is a drop-in replacement for searchSemantic when the
+// SearchSemanticIVF is a drop-in replacement for SearchSemantic when the
 // index carries an IVF companion. Skips the O(N·dim) brute-force cosine
 // loop in favor of probing only the nearest centroids.
-func searchSemanticIVF(idx *Index, ivfix *ivf.IVFFlat, queryVec []float32, cfg QueryConfig) []SearchResult {
+func SearchSemanticIVF(idx *Index, IVFIndex *ivf.IVFFlat, queryVec []float32, cfg QueryConfig) []SearchResult {
 	nprobe := cfg.Nprobe
-	hits := ivfix.Search(queryVec, cfg.K, nprobe)
+	hits := IVFIndex.Search(queryVec, cfg.K, nprobe)
 	out := make([]SearchResult, 0, len(hits))
 	for _, h := range hits {
 		if int(h.ID) >= len(idx.Chunks) {
@@ -255,14 +256,14 @@ func searchSemanticIVF(idx *Index, ivfix *ivf.IVFFlat, queryVec []float32, cfg Q
 	return out
 }
 
-// searchHybridIVF combines the IVF semantic shortlist with a full-corpus
+// SearchHybridIVF combines the IVF semantic shortlist with a full-corpus
 // BM25 scan. BM25 over N chunks is cheap — it's hash-map lookups per query
 // term — so scanning all of them keeps recall high even when the IVF
 // shortlist would miss a strong lexical match.
 //
 // Chunks not in the IVF shortlist get semantic=0, so their combined score
 // is BM25-only; the relevance gate then decides whether they survive.
-func searchHybridIVF(idx *Index, ivfix *ivf.IVFFlat, queryVec []float32, query string, cfg QueryConfig) []SearchResult {
+func SearchHybridIVF(idx *Index, IVFIndex *ivf.IVFFlat, queryVec []float32, query string, cfg QueryConfig) []SearchResult {
 	queryTerms := bm25Tokenize(query)
 
 	// Relevance gate on query terms (same as brute-force path).
@@ -288,7 +289,7 @@ func searchHybridIVF(idx *Index, ivfix *ivf.IVFFlat, queryVec []float32, query s
 	if nSem <= 0 {
 		nSem = autoNSemantic(cfg.K)
 	}
-	shortlist := ivfix.Search(queryVec, nSem, cfg.Nprobe)
+	shortlist := IVFIndex.Search(queryVec, nSem, cfg.Nprobe)
 	semanticByChunk := make(map[int]float64, len(shortlist))
 	for _, h := range shortlist {
 		if int(h.ID) < len(idx.Chunks) {
@@ -353,25 +354,39 @@ func searchHybridIVF(idx *Index, ivfix *ivf.IVFFlat, queryVec []float32, query s
 	return out
 }
 
-// dispatchSearch picks the right backend automatically: if the index
+// BackendDescription is a short human-readable tag describing which
+// search backend is bound to the index — used by cmd/ for diagnostic
+// banners. Avoids exposing IVF internals to the CLI layer.
+func BackendDescription(idx *Index, cfg QueryConfig) string {
+	if idx == nil || idx.IVFIndex == nil {
+		return "flat"
+	}
+	nprobe := cfg.Nprobe
+	if nprobe <= 0 {
+		nprobe = idx.IVFIndex.Nprobe
+	}
+	return fmt.Sprintf("ivf(K=%d,nprobe=%d)", idx.IVFIndex.K, nprobe)
+}
+
+// DispatchSearch picks the right backend automatically: if the index
 // carries an IVF companion, semantic/hybrid queries go through the IVF
 // path; otherwise they use brute-force. BM25 never changes. All
 // non-CLI callers (the tuner, the perf harness) should use this so a
 // single code path handles both backends.
-func dispatchSearch(idx *Index, qVec []float32, query string, cfg QueryConfig) []SearchResult {
+func DispatchSearch(idx *Index, qVec []float32, query string, cfg QueryConfig) []SearchResult {
 	switch cfg.Mode {
 	case "bm25":
-		return searchBM25(idx, query, cfg)
+		return SearchBM25(idx, query, cfg)
 	case "semantic":
-		if idx.ivfix != nil {
-			return searchSemanticIVF(idx, idx.ivfix, qVec, cfg)
+		if idx.IVFIndex != nil {
+			return SearchSemanticIVF(idx, idx.IVFIndex, qVec, cfg)
 		}
-		return searchSemantic(idx, qVec, cfg.K)
+		return SearchSemantic(idx, qVec, cfg.K)
 	default:
-		if idx.ivfix != nil {
-			return searchHybridIVF(idx, idx.ivfix, qVec, query, cfg)
+		if idx.IVFIndex != nil {
+			return SearchHybridIVF(idx, idx.IVFIndex, qVec, query, cfg)
 		}
-		return searchHybrid(idx, qVec, query, cfg)
+		return SearchHybrid(idx, qVec, query, cfg)
 	}
 }
 

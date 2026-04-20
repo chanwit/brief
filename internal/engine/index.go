@@ -1,7 +1,7 @@
 // Copyright (C) 2026 Chanwit Kaewkasi
 // SPDX-License-Identifier: MIT
 
-package main
+package engine
 
 import (
 	"encoding/json"
@@ -12,7 +12,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/chanwit/rag-engine/ivf"
+	"github.com/chanwit/brief/ivf"
 )
 
 // IndexSchemaVersion bumps whenever the on-disk layout changes in a way that
@@ -41,12 +41,12 @@ type Index struct {
 	DocFreq   map[string]int `json:"df"`
 	AvgDocLen float64        `json:"avg_dl"`
 
-	// Transient — not serialized. Populated by loadIndex when the sibling
+	// Transient — not serialized. Populated by LoadIndex when the sibling
 	// <path>.ivf/ directory exists and the index was built with UseIVF.
-	ivfix *ivf.IVFFlat `json:"-"`
+	IVFIndex *ivf.IVFFlat `json:"-"`
 }
 
-func loadIndex(path string) (*Index, error) {
+func LoadIndex(path string) (*Index, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("read index: %w", err)
@@ -56,7 +56,7 @@ func loadIndex(path string) (*Index, error) {
 		return nil, fmt.Errorf("parse index: %w", err)
 	}
 	if idx.Schema == 0 {
-		return nil, fmt.Errorf("index %s has no schema_version — rebuild with this version of rag-engine", path)
+		return nil, fmt.Errorf("index %s has no schema_version — rebuild with this version of brief", path)
 	}
 	if idx.Schema > IndexSchemaVersion {
 		return nil, fmt.Errorf("index %s uses schema v%d, this binary understands up to v%d",
@@ -68,16 +68,16 @@ func loadIndex(path string) (*Index, error) {
 
 	// Attach the mmap'd IVF companion index when one is present.
 	if idx.Config.UseIVF {
-		ivfDir := ivfSiblingPath(path)
-		if !fileExists(ivfDir) {
+		ivfDir := IVFSiblingPath(path)
+		if !FileExists(ivfDir) {
 			return nil, fmt.Errorf("index %s was built with use_ivf=true but %s is missing",
 				path, ivfDir)
 		}
-		ivfix, err := ivf.Open(ivfDir)
+		IVFIndex, err := ivf.Open(ivfDir)
 		if err != nil {
 			return nil, fmt.Errorf("open ivf: %w", err)
 		}
-		idx.ivfix = ivfix
+		idx.IVFIndex = IVFIndex
 	}
 	return &idx, nil
 }
@@ -86,17 +86,17 @@ func loadIndex(path string) (*Index, error) {
 // for the IVF companion. Safe to call multiple times; safe on an index
 // without an IVF attached.
 func (idx *Index) Close() error {
-	if idx == nil || idx.ivfix == nil {
+	if idx == nil || idx.IVFIndex == nil {
 		return nil
 	}
-	err := idx.ivfix.Close()
-	idx.ivfix = nil
+	err := idx.IVFIndex.Close()
+	idx.IVFIndex = nil
 	return err
 }
 
-// ivfSiblingPath returns the conventional location of the IVF directory
+// IVFSiblingPath returns the conventional location of the IVF directory
 // for a given index JSON path: <path>.ivf/ .
-func ivfSiblingPath(indexPath string) string { return indexPath + ".ivf" }
+func IVFSiblingPath(indexPath string) string { return indexPath + ".ivf" }
 
 // autoIVFCentroids picks a reasonable K when the user doesn't specify one.
 // The classical rule of thumb for IVF is K ≈ 4·√N.
@@ -114,7 +114,7 @@ func autoIVFCentroids(n int) int {
 	return k
 }
 
-func saveIndex(idx *Index, path string) error {
+func SaveIndex(idx *Index, path string) error {
 	data, err := json.MarshalIndent(idx, "", "  ")
 	if err != nil {
 		return err
@@ -122,10 +122,10 @@ func saveIndex(idx *Index, path string) error {
 	return os.WriteFile(path, data, 0o644)
 }
 
-// buildIndex computes BM25 statistics and embeddings for every chunk and
+// BuildIndex computes BM25 statistics and embeddings for every chunk and
 // returns a ready-to-serialize Index. Shared by cmdIndex, the tuner, and
 // tests so all three go through one code path.
-func buildIndex(chunks []Chunk, emb *Embedder, cfg IndexConfig) *Index {
+func BuildIndex(chunks []Chunk, emb *Embedder, cfg IndexConfig) *Index {
 	docFreq := make(map[string]int)
 	totalLen := 0
 	for i := range chunks {
@@ -169,13 +169,13 @@ func buildIndex(chunks []Chunk, emb *Embedder, cfg IndexConfig) *Index {
 	}
 }
 
-// buildIVFFromIndex trains an IVF-Flat over every chunk vector in idx and
+// BuildIVFFromIndex trains an IVF-Flat over every chunk vector in idx and
 // writes it to `dir`. Must be called BEFORE the caller strips vectors off
 // the chunks for serialization.
-func buildIVFFromIndex(idx *Index, dir string, cfg IndexConfig) (*ivf.IVFFlat, error) {
+func BuildIVFFromIndex(idx *Index, dir string, cfg IndexConfig) (*ivf.IVFFlat, error) {
 	n := len(idx.Chunks)
 	if n == 0 {
-		return nil, fmt.Errorf("buildIVFFromIndex: no chunks")
+		return nil, fmt.Errorf("BuildIVFFromIndex: no chunks")
 	}
 	dim := idx.ModelInfo.Dim
 
@@ -231,17 +231,17 @@ func buildIVFFromIndex(idx *Index, dir string, cfg IndexConfig) (*ivf.IVFFlat, e
 	return ix, nil
 }
 
-// stripChunkVectors drops every chunk's Vector slice so the JSON stays
+// StripChunkVectors drops every chunk's Vector slice so the JSON stays
 // small. Used right before saving when UseIVF=true.
-func stripChunkVectors(idx *Index) {
+func StripChunkVectors(idx *Index) {
 	for i := range idx.Chunks {
 		idx.Chunks[i].Vector = nil
 	}
 }
 
-// parseKnowledge walks dir, applies include/exclude globs, and chunks every
+// ParseKnowledge walks dir, applies include/exclude globs, and chunks every
 // matching file using the configured chunking strategy.
-func parseKnowledge(dir string, cfg IndexConfig) []Chunk {
+func ParseKnowledge(dir string, cfg IndexConfig) []Chunk {
 	var chunks []Chunk
 	includes := cfg.Include
 	if len(includes) == 0 {

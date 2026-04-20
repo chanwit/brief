@@ -37,7 +37,7 @@ func TestActiveKernel(t *testing.T) {
 func isAccelerated(funcName string) bool {
 	// Any implementation other than the scalar fallback counts as
 	// accelerated. On amd64 that's dotAVX2; on arm64 that's dotNEON.
-	return funcName != "" && funcName != fmt.Sprintf("%s.dotGeneric", "github.com/chanwit/rag-engine/ivf")
+	return funcName != "" && funcName != fmt.Sprintf("%s.dotGeneric", "github.com/chanwit/brief/ivf")
 }
 
 // TestDotMatchesGeneric: the accelerated Dot (whichever the current arch

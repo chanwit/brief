@@ -1,7 +1,7 @@
 // Copyright (C) 2026 Chanwit Kaewkasi
 // SPDX-License-Identifier: MIT
 
-package main
+package engine
 
 import (
 	"archive/tar"
@@ -21,7 +21,7 @@ import (
 // ceiling is intentionally high for slow links.
 var httpClient = &http.Client{Timeout: 10 * time.Minute}
 
-const userAgent = "rag-engine/" + ortVersion
+const userAgent = "brief/" + ortVersion
 
 func httpGet(url string) (*http.Response, error) {
 	req, err := http.NewRequest(http.MethodGet, url, nil)
@@ -34,50 +34,50 @@ func httpGet(url string) (*http.Response, error) {
 
 const ortVersion = "1.22.0"
 
-// Directory layout under $RAG_HOME (default: ~/.rag-engine):
+// Directory layout under $BRIEF_HOME (default: ~/.brief):
 //   lib/libonnxruntime.{so,dylib}
 //   models/<model-key>/{model.onnx,tokenizer.json}
 //
 // Env overrides:
-//   RAG_HOME         - overall root
-//   ORT_LIB_PATH     - full path to the ONNX runtime shared library
-//   RAG_MODELS_DIR   - full path to the models directory
+//   BRIEF_HOME        - overall root
+//   ORT_LIB_PATH      - full path to the ONNX runtime shared library
+//   BRIEF_MODELS_DIR  - full path to the models directory
 var (
-	ragHome     string
-	ortLibPath  string
-	modelsRoot  string
+	BriefHome  string
+	OrtLibPath string
+	ModelsRoot string
 )
 
 func init() {
 	home, _ := os.UserHomeDir()
-	ragHome = filepath.Join(home, ".rag-engine")
-	if v := os.Getenv("RAG_HOME"); v != "" {
-		ragHome = v
+	BriefHome = filepath.Join(home, ".brief")
+	if v := os.Getenv("BRIEF_HOME"); v != "" {
+		BriefHome = v
 	}
 
 	libName := "libonnxruntime.so"
 	if runtime.GOOS == "darwin" {
 		libName = "libonnxruntime.dylib"
 	}
-	ortLibPath = filepath.Join(ragHome, "lib", libName)
+	OrtLibPath = filepath.Join(BriefHome, "lib", libName)
 	if v := os.Getenv("ORT_LIB_PATH"); v != "" {
-		ortLibPath = v
+		OrtLibPath = v
 	}
 
-	modelsRoot = filepath.Join(ragHome, "models")
-	if v := os.Getenv("RAG_MODELS_DIR"); v != "" {
-		modelsRoot = v
+	ModelsRoot = filepath.Join(BriefHome, "models")
+	if v := os.Getenv("BRIEF_MODELS_DIR"); v != "" {
+		ModelsRoot = v
 	}
 }
 
-// ensureSetup makes sure the ONNX runtime library and the requested model
+// EnsureSetup makes sure the ONNX runtime library and the requested model
 // are available locally, downloading each on cache miss. Safe to call many
 // times.
-func ensureSetup(modelKey string) error {
+func EnsureSetup(modelKey string) error {
 	if err := ensureORTLibrary(); err != nil {
 		return fmt.Errorf("onnx runtime library: %w", err)
 	}
-	info, err := resolveModel(modelKey)
+	info, err := ResolveModel(modelKey)
 	if err != nil {
 		return err
 	}
@@ -87,25 +87,25 @@ func ensureSetup(modelKey string) error {
 	return nil
 }
 
-func fileExists(path string) bool {
+func FileExists(path string) bool {
 	_, err := os.Stat(path)
 	return err == nil
 }
 
 func ensureORTLibrary() error {
-	if fileExists(ortLibPath) {
+	if FileExists(OrtLibPath) {
 		return nil
 	}
 	url, err := ortDownloadURL()
 	if err != nil {
 		return err
 	}
-	if err := os.MkdirAll(filepath.Dir(ortLibPath), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(OrtLibPath), 0o755); err != nil {
 		return err
 	}
-	fmt.Fprintf(os.Stderr, "rag-engine: downloading ONNX runtime %s for %s/%s\n",
+	fmt.Fprintf(os.Stderr, "brief: downloading ONNX runtime %s for %s/%s\n",
 		ortVersion, runtime.GOOS, runtime.GOARCH)
-	return downloadAndExtractORT(url, ortLibPath)
+	return downloadAndExtractORT(url, OrtLibPath)
 }
 
 func ortDownloadURL() (string, error) {
@@ -178,23 +178,23 @@ func downloadAndExtractORT(url, destPath string) error {
 }
 
 func ensureModel(info ModelInfo) error {
-	dir := modelDirFor(info.Key)
+	dir := ModelDirFor(info.Key)
 	wantModel := filepath.Join(dir, "model.onnx")
 	wantTok := filepath.Join(dir, "tokenizer.json")
-	if fileExists(wantModel) && fileExists(wantTok) {
+	if FileExists(wantModel) && FileExists(wantTok) {
 		return nil
 	}
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err
 	}
-	if !fileExists(wantModel) {
+	if !FileExists(wantModel) {
 		url := fmt.Sprintf("https://huggingface.co/%s/resolve/%s/%s",
 			info.HFRepo, info.Revision, info.ModelPath)
 		if err := downloadToFile(url, wantModel); err != nil {
 			return err
 		}
 	}
-	if !fileExists(wantTok) {
+	if !FileExists(wantTok) {
 		url := fmt.Sprintf("https://huggingface.co/%s/resolve/%s/%s",
 			info.HFRepo, info.Revision, info.TokenizerPath)
 		if err := downloadToFile(url, wantTok); err != nil {
@@ -205,7 +205,7 @@ func ensureModel(info ModelInfo) error {
 }
 
 func downloadToFile(url, dest string) error {
-	fmt.Fprintf(os.Stderr, "rag-engine: downloading %s\n", url)
+	fmt.Fprintf(os.Stderr, "brief: downloading %s\n", url)
 	resp, err := httpGet(url)
 	if err != nil {
 		return err

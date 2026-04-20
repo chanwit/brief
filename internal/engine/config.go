@@ -1,7 +1,7 @@
 // Copyright (C) 2026 Chanwit Kaewkasi
 // SPDX-License-Identifier: MIT
 
-package main
+package engine
 
 import (
 	"encoding/json"
@@ -35,9 +35,9 @@ type IndexConfig struct {
 	IVFNprobe    int  `json:"ivf_nprobe,omitempty"` // default probe count baked into the IVF manifest; 0 = auto
 }
 
-func defaultIndexConfig() IndexConfig {
+func DefaultIndexConfig() IndexConfig {
 	return IndexConfig{
-		ModelKey:      defaultModelKey,
+		ModelKey:      DefaultModelKey,
 		ChunkStrategy: "heading",
 		ChunkSize:     500,
 		ChunkOverlap:  100,
@@ -71,7 +71,7 @@ type QueryConfig struct {
 	NSemantic int `json:"n_semantic,omitempty"`
 }
 
-// defaultQueryConfig returns the baked-in best-known hybrid hyperparameters.
+// DefaultQueryConfig returns the baked-in best-known hybrid hyperparameters.
 //
 // Provenance: these values come from TestScenariosTuneToFullHitRate —
 // random search over the sampleQueryConfig space against an 18-query
@@ -81,7 +81,7 @@ type QueryConfig struct {
 //
 // Caveats:
 //   - Tuned on one English technical-docs corpus; other domains may
-//     benefit from re-tuning via `rag-engine tune-query`.
+//     benefit from re-tuning via `brief tune recall`.
 //   - The canonical BM25 textbook values are k1=1.2, b=0.75; our k1/b
 //     drifted upward because the scenarios corpus has short, term-dense
 //     sections. If you see poor recall on long prose, run tune-query or
@@ -89,10 +89,14 @@ type QueryConfig struct {
 //   - The semantic floors (hard/soft) are deliberately tighter than the
 //     old 0.20/0.30 defaults — this rejects low-cosine noise earlier
 //     and improves precision without hurting hit-rate on our eval set.
-func defaultQueryConfig() QueryConfig {
+func DefaultQueryConfig() QueryConfig {
 	return QueryConfig{
-		Mode:               "hybrid",
-		K:                  5,
+		Mode: "hybrid",
+		// K=3 is chosen for the primary use case — coding-agent hooks
+		// that inject retrieved chunks back into the prompt. Three
+		// chunks cover most queries without blowing the context budget.
+		// CLI power users can still pass -k N.
+		K:                  3,
 		WeightSemantic:     0.48,
 		WeightBM25:         0.52,
 		BM25K1:             2.33,
@@ -104,19 +108,19 @@ func defaultQueryConfig() QueryConfig {
 	}
 }
 
-func loadQueryConfig(path string) (QueryConfig, error) {
+func LoadQueryConfig(path string) (QueryConfig, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return QueryConfig{}, err
 	}
-	cfg := defaultQueryConfig()
+	cfg := DefaultQueryConfig()
 	if err := json.Unmarshal(data, &cfg); err != nil {
 		return QueryConfig{}, fmt.Errorf("parse %s: %w", path, err)
 	}
 	return cfg, nil
 }
 
-func saveQueryConfig(cfg QueryConfig, path string) error {
+func SaveQueryConfig(cfg QueryConfig, path string) error {
 	data, err := json.MarshalIndent(cfg, "", "  ")
 	if err != nil {
 		return err
@@ -124,19 +128,19 @@ func saveQueryConfig(cfg QueryConfig, path string) error {
 	return os.WriteFile(path, data, 0o644)
 }
 
-func loadIndexConfig(path string) (IndexConfig, error) {
+func LoadIndexConfig(path string) (IndexConfig, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return IndexConfig{}, err
 	}
-	cfg := defaultIndexConfig()
+	cfg := DefaultIndexConfig()
 	if err := json.Unmarshal(data, &cfg); err != nil {
 		return IndexConfig{}, fmt.Errorf("parse %s: %w", path, err)
 	}
 	return cfg, nil
 }
 
-func saveIndexConfig(cfg IndexConfig, path string) error {
+func SaveIndexConfig(cfg IndexConfig, path string) error {
 	data, err := json.MarshalIndent(cfg, "", "  ")
 	if err != nil {
 		return err

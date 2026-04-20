@@ -1,7 +1,7 @@
 // Copyright (C) 2026 Chanwit Kaewkasi
 // SPDX-License-Identifier: MIT
 
-package main
+package engine
 
 import (
 	"fmt"
@@ -9,7 +9,7 @@ import (
 	"sort"
 )
 
-// ModelInfo is everything rag-engine needs to load and run an ONNX embedding
+// ModelInfo is everything brief needs to load and run an ONNX embedding
 // model: where to fetch it, how to tokenize, how to pool the hidden state,
 // and what ONNX input/output names the session should bind.
 //
@@ -29,11 +29,11 @@ type ModelInfo struct {
 	Outputs       []string `json:"outputs"`
 }
 
-// knownModels is the built-in registry. Extend it by adding entries here —
+// KnownModels is the built-in registry. Extend it by adding entries here —
 // nothing else in the codebase needs to change. All entries in the default
 // registry use BERT-style WordPiece tokenizers so the built-in tokenizer
 // code path works for each of them.
-var knownModels = map[string]ModelInfo{
+var KnownModels = map[string]ModelInfo{
 	"all-MiniLM-L6-v2": {
 		Key: "all-MiniLM-L6-v2", HFRepo: "Xenova/all-MiniLM-L6-v2",
 		Revision: "main", ModelPath: "onnx/model.onnx", TokenizerPath: "tokenizer.json",
@@ -71,28 +71,28 @@ var knownModels = map[string]ModelInfo{
 	},
 }
 
-const defaultModelKey = "all-MiniLM-L6-v2"
+const DefaultModelKey = "all-MiniLM-L6-v2"
 
-func resolveModel(key string) (ModelInfo, error) {
+func ResolveModel(key string) (ModelInfo, error) {
 	if key == "" {
-		key = defaultModelKey
+		key = DefaultModelKey
 	}
-	info, ok := knownModels[key]
+	info, ok := KnownModels[key]
 	if !ok {
-		return ModelInfo{}, fmt.Errorf("unknown model %q (run `rag-engine models` to list)", key)
+		return ModelInfo{}, fmt.Errorf("unknown model %q (run `brief models` to list)", key)
 	}
 	return info, nil
 }
 
-func modelKeys() []string {
-	keys := make([]string, 0, len(knownModels))
-	for k := range knownModels {
+func ModelKeys() []string {
+	keys := make([]string, 0, len(KnownModels))
+	for k := range KnownModels {
 		keys = append(keys, k)
 	}
 	sort.Strings(keys)
 	return keys
 }
 
-func modelDirFor(key string) string {
-	return filepath.Join(modelsRoot, key)
+func ModelDirFor(key string) string {
+	return filepath.Join(ModelsRoot, key)
 }

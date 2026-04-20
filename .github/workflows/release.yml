@@ -38,8 +38,8 @@ jobs:
       - name: Cache ONNX runtime + model
         uses: actions/cache@v4
         with:
-          path: ~/.rag-engine
-          key: rag-engine-deps-${{ matrix.goos }}-${{ matrix.goarch }}-ort1.22.0-xenova-minilm-v1
+          path: ~/.brief
+          key: brief-deps-${{ matrix.goos }}-${{ matrix.goarch }}-ort1.22.0-xenova-minilm-v1
 
       - name: Test
         run: make test
@@ -55,7 +55,7 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: rag-engine-${{ matrix.goos }}-${{ matrix.goarch }}
+          name: brief-${{ matrix.goos }}-${{ matrix.goarch }}
           path: dist/*.tar.gz
           if-no-files-found: error
 

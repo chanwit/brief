@@ -41,8 +41,8 @@ jobs:
       - name: Cache ONNX runtime + model
         uses: actions/cache@v4
         with:
-          path: ~/.rag-engine
-          key: rag-engine-deps-${{ matrix.goos }}-${{ matrix.goarch }}-ort1.22.0-xenova-minilm-v1
+          path: ~/.brief
+          key: brief-deps-${{ matrix.goos }}-${{ matrix.goarch }}-ort1.22.0-xenova-minilm-v1
 
       - run: make vet
       - run: make test

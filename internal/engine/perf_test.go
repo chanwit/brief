@@ -1,7 +1,7 @@
 // Copyright (C) 2026 Chanwit Kaewkasi
 // SPDX-License-Identifier: MIT
 
-package main
+package engine
 
 import (
 	"fmt"
@@ -45,7 +45,7 @@ var perfQueries = []struct {
 // ~5-second build cost.
 type perfCorpus struct {
 	flatIdx    *Index
-	ivfIdx     *Index   // loaded via loadIndex so the IVF is mmap'd
+	ivfIdx     *Index   // loaded via LoadIndex so the IVF is mmap'd
 	emb        *Embedder
 	preEmbeds  [][]float32
 }
@@ -57,27 +57,30 @@ var (
 )
 
 // locatePerfCorpus finds the scenarios knowledge directory. Priority:
-// 1. RAG_PERF_CORPUS env var (explicit override)
-// 2. ../cub-claude/cmd/assets/.claude/knowledge  (relative to rag-engine repo)
-// 3. $HOME/Dropbox/projects/confighub-workspace/cub-claude/... (dev default)
+//  1. BRIEF_PERF_CORPUS env var (explicit override)
+//  2. ./testdata/scenarios-knowledge  (when a fixture is vendored)
+//  3. ../cub-claude/cmd/assets/.claude/knowledge  (when the sibling repo
+//     is checked out next to this one, e.g. in CI)
+//
+// If none of those resolve, the perf tests skip — they're optional
+// benchmarks, not part of the correctness bar.
 func locatePerfCorpus() (string, error) {
-	if p := os.Getenv("RAG_PERF_CORPUS"); p != "" {
+	if p := os.Getenv("BRIEF_PERF_CORPUS"); p != "" {
 		if st, err := os.Stat(p); err == nil && st.IsDir() {
 			return p, nil
 		}
-		return "", fmt.Errorf("RAG_PERF_CORPUS=%q is not a directory", p)
+		return "", fmt.Errorf("BRIEF_PERF_CORPUS=%q is not a directory", p)
 	}
 	candidates := []string{
+		"testdata/scenarios-knowledge",
 		"../cub-claude/cmd/assets/.claude/knowledge",
-		filepath.Join(os.Getenv("HOME"),
-			"Dropbox/projects/confighub-workspace/cub-claude/cmd/assets/.claude/knowledge"),
 	}
 	for _, c := range candidates {
 		if st, err := os.Stat(c); err == nil && st.IsDir() {
 			return c, nil
 		}
 	}
-	return "", fmt.Errorf("corpus not found; set RAG_PERF_CORPUS to point at a knowledge directory")
+	return "", fmt.Errorf("corpus not found; set BRIEF_PERF_CORPUS to point at a knowledge directory")
 }
 
 // setupPerfCorpus does the heavy one-time work: parse → build flat →
@@ -92,31 +95,31 @@ func setupPerfCorpus(tb testing.TB) *perfCorpus {
 			return
 		}
 
-		info, _ := resolveModel(defaultModelKey)
-		emb, err := loadEmbedder(info)
+		info, _ := ResolveModel(DefaultModelKey)
+		emb, err := LoadEmbedder(info)
 		if err != nil {
-			perfErr = fmt.Errorf("loadEmbedder: %w", err)
+			perfErr = fmt.Errorf("LoadEmbedder: %w", err)
 			return
 		}
 
 		// Flat baseline.
-		flatCfg := defaultIndexConfig()
+		flatCfg := DefaultIndexConfig()
 		flatCfg.Include = []string{"*.md"}
-		flatChunks := parseKnowledge(kdir, flatCfg)
-		flatIdx := buildIndex(flatChunks, emb, flatCfg)
+		flatChunks := ParseKnowledge(kdir, flatCfg)
+		flatIdx := BuildIndex(flatChunks, emb, flatCfg)
 
 		// IVF companion. K tuned for the ~180-chunk corpus; with
 		// nprobe=K we effectively get exact recall, which lets us
 		// measure overhead cleanly. Realistic configs would use
 		// nprobe=√K≈10 at ~100k chunks.
-		ivfCfg := defaultIndexConfig()
+		ivfCfg := DefaultIndexConfig()
 		ivfCfg.Include = []string{"*.md"}
 		ivfCfg.UseIVF = true
 		ivfCfg.IVFCentroids = 32
 		ivfCfg.IVFNprobe = 8
 
-		ivfChunks := parseKnowledge(kdir, ivfCfg)
-		built := buildIndex(ivfChunks, emb, ivfCfg)
+		ivfChunks := ParseKnowledge(kdir, ivfCfg)
+		built := BuildIndex(ivfChunks, emb, ivfCfg)
 
 		tmp, err := os.MkdirTemp("", "rag-perf-*")
 		if err != nil {
@@ -124,21 +127,21 @@ func setupPerfCorpus(tb testing.TB) *perfCorpus {
 			return
 		}
 		ivfJSON := filepath.Join(tmp, "ivf.json")
-		ivfDir := ivfSiblingPath(ivfJSON)
-		if _, err := buildIVFFromIndex(built, ivfDir, ivfCfg); err != nil {
-			perfErr = fmt.Errorf("buildIVFFromIndex: %w", err)
+		ivfDir := IVFSiblingPath(ivfJSON)
+		if _, err := BuildIVFFromIndex(built, ivfDir, ivfCfg); err != nil {
+			perfErr = fmt.Errorf("BuildIVFFromIndex: %w", err)
 			return
 		}
-		stripChunkVectors(built)
-		if err := saveIndex(built, ivfJSON); err != nil {
-			perfErr = fmt.Errorf("saveIndex: %w", err)
+		StripChunkVectors(built)
+		if err := SaveIndex(built, ivfJSON); err != nil {
+			perfErr = fmt.Errorf("SaveIndex: %w", err)
 			return
 		}
-		// Round-trip through loadIndex so the *mmap* path is what
+		// Round-trip through LoadIndex so the *mmap* path is what
 		// benchmarks measure — not a fresh in-memory instance.
-		ivfIdx, err := loadIndex(ivfJSON)
+		ivfIdx, err := LoadIndex(ivfJSON)
 		if err != nil {
-			perfErr = fmt.Errorf("loadIndex: %w", err)
+			perfErr = fmt.Errorf("LoadIndex: %w", err)
 			return
 		}
 
@@ -155,7 +158,7 @@ func setupPerfCorpus(tb testing.TB) *perfCorpus {
 		}
 		tb.Logf("perf corpus: %d flat chunks, %d ivf chunks, IVF K=%d nprobe=%d",
 			len(flatIdx.Chunks), len(ivfIdx.Chunks),
-			ivfIdx.ivfix.K, ivfIdx.ivfix.Nprobe)
+			ivfIdx.IVFIndex.K, ivfIdx.IVFIndex.Nprobe)
 	})
 	if perfErr != nil {
 		tb.Skipf("perf corpus unavailable: %v", perfErr)
@@ -173,15 +176,15 @@ func setupPerfCorpus(tb testing.TB) *perfCorpus {
 func TestScenariosIVFRecallVsFlat(t *testing.T) {
 	p := setupPerfCorpus(t)
 
-	cfg := defaultQueryConfig()
+	cfg := DefaultQueryConfig()
 	cfg.Mode = "hybrid"
 	cfg.K = 5
 
 	var flatHits, ivfHits int
 	for i, q := range perfQueries {
 		qv := p.preEmbeds[i]
-		flat := searchHybrid(p.flatIdx, qv, q.query, cfg)
-		ivfx := searchHybridIVF(p.ivfIdx, p.ivfIdx.ivfix, qv, q.query, cfg)
+		flat := SearchHybrid(p.flatIdx, qv, q.query, cfg)
+		ivfx := SearchHybridIVF(p.ivfIdx, p.ivfIdx.IVFIndex, qv, q.query, cfg)
 		fOK, iOK := topHitsAny(flat, q.want), topHitsAny(ivfx, q.want)
 		if fOK {
 			flatHits++
@@ -236,33 +239,33 @@ func scenariosEvalSet() *EvalSet {
 //      regress and reached ≥ the human target (default 1.0).
 //
 // Configurable targets:
-//   RAG_PERF_TUNE_K       top-K (default 5)
-//   RAG_PERF_TUNE_TARGET  required final hit rate (default 1.0)
-//   RAG_PERF_TUNE_TRIALS  random-search budget (default 400)
+//   BRIEF_PERF_TUNE_K       top-K (default 5)
+//   BRIEF_PERF_TUNE_TARGET  required final hit rate (default 1.0)
+//   BRIEF_PERF_TUNE_TRIALS  random-search budget (default 400)
 func TestScenariosTuneToFullHitRate(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping tuning test in -short mode")
 	}
 	p := setupPerfCorpus(t)
 
-	k := envInt("RAG_PERF_TUNE_K", 5)
-	target := envFloat("RAG_PERF_TUNE_TARGET", 1.0)
-	trials := envInt("RAG_PERF_TUNE_TRIALS", 400)
+	k := envInt("BRIEF_PERF_TUNE_K", 5)
+	target := envFloat("BRIEF_PERF_TUNE_TARGET", 1.0)
+	trials := envInt("BRIEF_PERF_TUNE_TRIALS", 400)
 
 	set := scenariosEvalSet()
-	preQ := preEmbedQueries(p.emb, set)
+	preQ := PreEmbedQueries(p.emb, set)
 
 	// ---- Baseline: defaults ----
-	base := defaultQueryConfig()
+	base := DefaultQueryConfig()
 	base.Mode = "hybrid"
 	base.K = k
-	baseMetrics := evaluateConfig(p.flatIdx, preQ, base)
+	baseMetrics := EvaluateConfig(p.flatIdx, preQ, base)
 	t.Logf("baseline hybrid: hit@%d=%.4f MRR=%.4f (%d/%d queries)",
 		k, baseMetrics.HitRate, baseMetrics.MRR,
 		int(baseMetrics.HitRate*float64(len(set.Queries))+0.5), len(set.Queries))
 
 	// ---- Tune ----
-	best, bestMetrics := tuneQueryConfig(p.flatIdx, p.emb, set, trials, "hybrid", k, "hit_rate")
+	best, bestMetrics := TuneQueryConfig(p.flatIdx, p.emb, set, trials, "hybrid", k, "hit_rate")
 
 	t.Logf("tuned hybrid:    hit@%d=%.4f MRR=%.4f", k, bestMetrics.HitRate, bestMetrics.MRR)
 	t.Logf("best QueryConfig: ws=%.3f wb=%.3f k1=%.3f b=%.3f hf=%.3f sf=%.3f bm=%.3f",
@@ -286,9 +289,9 @@ func TestScenariosTuneToFullHitRate(t *testing.T) {
 	}
 
 	// Persist the tuned config next to the repo so a human can inspect
-	// it — and so it can be fed straight back as `rag-engine query --config`.
+	// it — and so it can be fed straight back as `brief recall --config`.
 	out := filepath.Join(os.TempDir(), "scenarios-tuned-query.json")
-	if err := saveQueryConfig(best, out); err != nil {
+	if err := SaveQueryConfig(best, out); err != nil {
 		t.Logf("save tuned config: %v", err)
 	} else {
 		t.Logf("tuned QueryConfig saved to %s", out)
@@ -296,7 +299,7 @@ func TestScenariosTuneToFullHitRate(t *testing.T) {
 
 	// Verify the tuned config also works on IVF — no reason it shouldn't,
 	// but this catches any subtle behavioral drift between flat and IVF.
-	ivfMetrics := evaluateConfig(p.ivfIdx, preQ, best)
+	ivfMetrics := EvaluateConfig(p.ivfIdx, preQ, best)
 	t.Logf("tuned on IVF:    hit@%d=%.4f MRR=%.4f", k, ivfMetrics.HitRate, ivfMetrics.MRR)
 	if ivfMetrics.HitRate+1e-9 < target {
 		t.Fatalf("tuned config fails on IVF backend: hit=%.4f target=%.4f",
@@ -310,10 +313,10 @@ type evalMiss struct {
 	top3  string
 }
 
-func findMisses(idx *Index, queries []preEmbedded, cfg QueryConfig) []evalMiss {
+func findMisses(idx *Index, queries []PreEmbedded, cfg QueryConfig) []evalMiss {
 	var out []evalMiss
 	for _, q := range queries {
-		res := dispatchSearch(idx, q.qVec, q.Query, cfg)
+		res := DispatchSearch(idx, q.qVec, q.Query, cfg)
 		if topHitsAny(res, q.RelevantFiles) {
 			continue
 		}
@@ -374,14 +377,14 @@ func topHitsAny(results []SearchResult, want []string) bool {
 
 func BenchmarkScenariosBM25Flat(b *testing.B) {
 	p := setupPerfCorpus(b)
-	cfg := defaultQueryConfig()
+	cfg := DefaultQueryConfig()
 	cfg.Mode = "bm25"
 	cfg.K = 5
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		q := perfQueries[i%len(perfQueries)]
-		_ = searchBM25(p.flatIdx, q.query, cfg)
+		_ = SearchBM25(p.flatIdx, q.query, cfg)
 	}
 }
 
@@ -390,45 +393,45 @@ func BenchmarkScenariosSemanticFlat(b *testing.B) {
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		_ = searchSemantic(p.flatIdx, p.preEmbeds[i%len(p.preEmbeds)], 5)
+		_ = SearchSemantic(p.flatIdx, p.preEmbeds[i%len(p.preEmbeds)], 5)
 	}
 }
 
 func BenchmarkScenariosSemanticIVF(b *testing.B) {
 	p := setupPerfCorpus(b)
-	cfg := defaultQueryConfig()
+	cfg := DefaultQueryConfig()
 	cfg.K = 5
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		_ = searchSemanticIVF(p.ivfIdx, p.ivfIdx.ivfix,
+		_ = SearchSemanticIVF(p.ivfIdx, p.ivfIdx.IVFIndex,
 			p.preEmbeds[i%len(p.preEmbeds)], cfg)
 	}
 }
 
 func BenchmarkScenariosHybridFlat(b *testing.B) {
 	p := setupPerfCorpus(b)
-	cfg := defaultQueryConfig()
+	cfg := DefaultQueryConfig()
 	cfg.Mode = "hybrid"
 	cfg.K = 5
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		q := perfQueries[i%len(perfQueries)]
-		_ = searchHybrid(p.flatIdx, p.preEmbeds[i%len(p.preEmbeds)], q.query, cfg)
+		_ = SearchHybrid(p.flatIdx, p.preEmbeds[i%len(p.preEmbeds)], q.query, cfg)
 	}
 }
 
 func BenchmarkScenariosHybridIVF(b *testing.B) {
 	p := setupPerfCorpus(b)
-	cfg := defaultQueryConfig()
+	cfg := DefaultQueryConfig()
 	cfg.Mode = "hybrid"
 	cfg.K = 5
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		q := perfQueries[i%len(perfQueries)]
-		_ = searchHybridIVF(p.ivfIdx, p.ivfIdx.ivfix,
+		_ = SearchHybridIVF(p.ivfIdx, p.ivfIdx.IVFIndex,
 			p.preEmbeds[i%len(p.preEmbeds)], q.query, cfg)
 	}
 }

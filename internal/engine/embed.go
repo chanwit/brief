@@ -1,7 +1,7 @@
 // Copyright (C) 2026 Chanwit Kaewkasi
 // SPDX-License-Identifier: MIT
 
-package main
+package engine
 
 import (
 	"encoding/json"
@@ -22,20 +22,20 @@ type Embedder struct {
 	Tokenizer *Tokenizer
 }
 
-func initORT() {
-	if err := initORTSafe(); err != nil {
+func InitORT() {
+	if err := InitORTSafe(); err != nil {
 		fmt.Fprintf(os.Stderr, "error initializing ONNX runtime: %v\n", err)
 		os.Exit(1)
 	}
 }
 
-func initORTSafe() error {
-	ort.SetSharedLibraryPath(ortLibPath)
+func InitORTSafe() error {
+	ort.SetSharedLibraryPath(OrtLibPath)
 	return ort.InitializeEnvironment()
 }
 
-func loadEmbedder(info ModelInfo) (*Embedder, error) {
-	dir := modelDirFor(info.Key)
+func LoadEmbedder(info ModelInfo) (*Embedder, error) {
+	dir := ModelDirFor(info.Key)
 	modelPath := filepath.Join(dir, "model.onnx")
 	session, err := ort.NewDynamicAdvancedSession(modelPath, info.Inputs, info.Outputs, nil)
 	if err != nil {
