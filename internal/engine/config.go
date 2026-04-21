@@ -69,6 +69,15 @@ type QueryConfig struct {
 	//             but semantic scores only contribute to this subset. 0 = auto.
 	Nprobe    int `json:"nprobe,omitempty"`
 	NSemantic int `json:"n_semantic,omitempty"`
+
+	// Wikilink expansion: after selecting the top-K primary hits,
+	// follow each hit's [[wikilinks]] one hop and surface the linked
+	// chunks as additional results (marked with LinkedFrom). Gives
+	// extra context for human-curated knowledge graphs (Obsidian,
+	// Logseq) without running any embedder.
+	// MaxLinked caps the total number of linked chunks added across
+	// all primary hits. 0 disables the expansion entirely.
+	MaxLinked int `json:"max_linked,omitempty"`
 }
 
 // DefaultQueryConfig returns the baked-in best-known hybrid hyperparameters.
@@ -105,6 +114,10 @@ func DefaultQueryConfig() QueryConfig {
 		SemanticSoftFloor:  0.43,
 		BM25MinForSoftZone: 0.44,
 		MinQueryTerms:      0,
+		// Wikilink expansion adds at most 3 linked chunks total.
+		// Small enough to keep hook-mode output bounded, big enough to
+		// catch the most-referenced notes in a small Obsidian vault.
+		MaxLinked: 3,
 	}
 }
 

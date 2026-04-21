@@ -71,11 +71,28 @@ var KnownModels = map[string]ModelInfo{
 	},
 }
 
-const DefaultModelKey = "all-MiniLM-L6-v2"
+const (
+	DefaultModelKey = "all-MiniLM-L6-v2"
+
+	// NopModelKey is the sentinel that tells ResolveModel to return a
+	// no-embeddings ModelInfo. Used when the caller wants a BM25-only
+	// index (brief learn --embedder none): no ONNX download, no
+	// per-chunk embedding, a much smaller index JSON, and no semantic
+	// search at query time.
+	NopModelKey = "none"
+)
+
+// nopModelInfo describes the BM25-only "model" — a distinguishable
+// ModelInfo that carries no embedding parameters. Dim=0 is the key
+// invariant: callers gate embedding-dependent paths on HasEmbeddings.
+var nopModelInfo = ModelInfo{Key: NopModelKey}
 
 func ResolveModel(key string) (ModelInfo, error) {
 	if key == "" {
 		key = DefaultModelKey
+	}
+	if key == NopModelKey {
+		return nopModelInfo, nil
 	}
 	info, ok := KnownModels[key]
 	if !ok {

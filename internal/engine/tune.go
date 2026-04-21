@@ -148,7 +148,7 @@ type PreEmbedded struct {
 	qVec []float32
 }
 
-func PreEmbedQueries(emb *Embedder, set *EvalSet) []PreEmbedded {
+func PreEmbedQueries(emb Embedder, set *EvalSet) []PreEmbedded {
 	out := make([]PreEmbedded, len(set.Queries))
 	for i, q := range set.Queries {
 		out[i] = PreEmbedded{EvalQuery: q, qVec: emb.Embed(q.Query)}
@@ -182,7 +182,7 @@ func scoreObjective(m EvalMetrics, objective string) float64 {
 // the config that maximizes the chosen objective on the eval set.
 // objective: "mrr" (default) or "hit_rate" (for a strict "in top-K at all"
 // correctness bar).
-func TuneQueryConfig(idx *Index, emb *Embedder, set *EvalSet, trials int, mode string, k int, objective string) (QueryConfig, EvalMetrics) {
+func TuneQueryConfig(idx *Index, emb Embedder, set *EvalSet, trials int, mode string, k int, objective string) (QueryConfig, EvalMetrics) {
 	if trials <= 0 {
 		trials = 200
 	}
@@ -233,14 +233,14 @@ func sampleQueryConfig(r *rand.Rand, mode string, k int) QueryConfig {
 // TuneIndexConfig grid-walks a small set of chunking strategies, building
 // a fresh index for each config. Because embedding the corpus dominates
 // the wall clock, keep trials small (default 8).
-func TuneIndexConfig(knowledgeDir string, emb *Embedder, set *EvalSet, trials int, queryCfg QueryConfig, objective string) (IndexConfig, *Index, EvalMetrics) {
+func TuneIndexConfig(knowledgeDir string, emb Embedder, set *EvalSet, trials int, queryCfg QueryConfig, objective string) (IndexConfig, *Index, EvalMetrics) {
 	if trials <= 0 {
 		trials = 8
 	}
 	queries := PreEmbedQueries(emb, set)
 
 	bestCfg := DefaultIndexConfig()
-	bestCfg.ModelKey = emb.Info.Key
+	bestCfg.ModelKey = emb.Info().Key
 	bestChunks := ParseKnowledge(knowledgeDir, bestCfg)
 	bestIdx := BuildIndex(bestChunks, emb, bestCfg)
 	bestMetrics := EvaluateConfig(bestIdx, queries, queryCfg)
@@ -256,7 +256,7 @@ func TuneIndexConfig(knowledgeDir string, emb *Embedder, set *EvalSet, trials in
 	r := rand.New(rand.NewSource(42))
 	for t := 0; t < trials; t++ {
 		cfg := DefaultIndexConfig()
-		cfg.ModelKey = emb.Info.Key
+		cfg.ModelKey = emb.Info().Key
 		cfg.ChunkStrategy = strategies[r.Intn(len(strategies))]
 		cfg.ChunkSize = sizes[r.Intn(len(sizes))]
 		cfg.ChunkOverlap = overlaps[r.Intn(len(overlaps))]

@@ -46,7 +46,7 @@ var perfQueries = []struct {
 type perfCorpus struct {
 	flatIdx    *Index
 	ivfIdx     *Index   // loaded via LoadIndex so the IVF is mmap'd
-	emb        *Embedder
+	emb        Embedder
 	preEmbeds  [][]float32
 }
 

@@ -14,12 +14,33 @@ import (
 	ort "github.com/yalue/onnxruntime_go"
 )
 
-// Embedder bundles a loaded ONNX session with its tokenizer and ModelInfo.
-// It is the single entrypoint tests and command code go through to embed text.
-type Embedder struct {
-	Info      ModelInfo
-	Session   *ort.DynamicAdvancedSession
-	Tokenizer *Tokenizer
+// Embedder is the abstract interface that turns a piece of text into a
+// dense vector. Two implementations ship today:
+//
+//   - onnxEmbedder wraps a loaded ONNX session + tokenizer and runs a
+//     sentence-transformer model locally. See LoadEmbedder.
+//   - nopEmbedder is a no-op that always returns nil. Used when the
+//     caller wants a BM25-only index (no ONNX setup, no downloads,
+//     no embedding cost). Selected by ModelInfo.Key == NopModelKey.
+//
+// Additional backends (OpenAI, Cohere, Ollama, …) can satisfy this
+// interface without touching the rest of the engine.
+type Embedder interface {
+	// Info returns the ModelInfo that describes the embedding produced
+	// by this embedder. Serialized into indexes so queries can verify
+	// they're using a compatible embedder.
+	Info() ModelInfo
+	// Embed returns a vector for the given text. May return nil on a
+	// nop embedder; callers that need a vector must check.
+	Embed(text string) []float32
+	// Close releases any resources held by the embedder.
+	Close() error
+}
+
+// HasEmbeddings reports whether an embedder actually produces vectors.
+// Callers use it to gate semantic / hybrid search paths.
+func HasEmbeddings(e Embedder) bool {
+	return e != nil && e.Info().Dim > 0
 }
 
 func InitORT() {
@@ -34,7 +55,13 @@ func InitORTSafe() error {
 	return ort.InitializeEnvironment()
 }
 
-func LoadEmbedder(info ModelInfo) (*Embedder, error) {
+// LoadEmbedder constructs the right Embedder for the given ModelInfo.
+// NopModelKey yields a no-op embedder (no ONNX session loaded); any
+// other key loads an ONNX session from the on-disk model dir.
+func LoadEmbedder(info ModelInfo) (Embedder, error) {
+	if info.Key == NopModelKey || info.Dim == 0 {
+		return nopEmbedder{info: info}, nil
+	}
 	dir := ModelDirFor(info.Key)
 	modelPath := filepath.Join(dir, "model.onnx")
 	session, err := ort.NewDynamicAdvancedSession(modelPath, info.Inputs, info.Outputs, nil)
@@ -46,18 +73,36 @@ func LoadEmbedder(info ModelInfo) (*Embedder, error) {
 		session.Destroy()
 		return nil, err
 	}
-	return &Embedder{Info: info, Session: session, Tokenizer: tok}, nil
+	return &onnxEmbedder{info: info, session: session, tok: tok}, nil
 }
 
-func (e *Embedder) Close() {
-	if e != nil && e.Session != nil {
-		e.Session.Destroy()
+// onnxEmbedder runs a local sentence-transformer via onnxruntime_go.
+type onnxEmbedder struct {
+	info    ModelInfo
+	session *ort.DynamicAdvancedSession
+	tok     *Tokenizer
+}
+
+func (e *onnxEmbedder) Info() ModelInfo { return e.info }
+
+func (e *onnxEmbedder) Close() error {
+	if e != nil && e.session != nil {
+		e.session.Destroy()
 	}
+	return nil
 }
 
-func (e *Embedder) Embed(text string) []float32 {
-	return runEmbed(e.Session, e.Tokenizer, &e.Info, text)
+func (e *onnxEmbedder) Embed(text string) []float32 {
+	return runEmbed(e.session, e.tok, &e.info, text)
 }
+
+// nopEmbedder is a zero-cost Embedder that produces no vectors. An
+// index built through it relies entirely on BM25 at recall time.
+type nopEmbedder struct{ info ModelInfo }
+
+func (n nopEmbedder) Info() ModelInfo         { return n.info }
+func (n nopEmbedder) Embed(text string) []float32 { return nil }
+func (n nopEmbedder) Close() error            { return nil }
 
 // Tokenizer is a minimal BERT-style WordPiece tokenizer loaded from a
 // HuggingFace tokenizer.json file.

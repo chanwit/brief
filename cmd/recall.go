@@ -33,6 +33,9 @@ var recallFlags struct {
 	nprobe int
 	nsem   int
 
+	maxLinked int
+	noLinks   bool
+
 	jsonOut bool
 }
 
@@ -99,11 +102,30 @@ func runRecall(cmd *cobra.Command, args []string) error {
 	if recallFlags.nsem > 0 {
 		cfg.NSemantic = recallFlags.nsem
 	}
+	if cmd.Flags().Changed("max-linked") {
+		cfg.MaxLinked = recallFlags.maxLinked
+	}
+	if recallFlags.noLinks {
+		cfg.MaxLinked = 0
+	}
 
-	var results []engine.SearchResult
-	if cfg.Mode == "bm25" {
-		results = engine.SearchBM25(idx, query, cfg)
-	} else {
+	// An index built with --embedder none has no vectors. Downgrade
+	// semantic/hybrid to BM25 silently (and skip all ONNX init) so
+	// recall still returns useful results. If the user explicitly
+	// asked for semantic, surface an error instead.
+	indexHasVectors := idx.ModelInfo.Key != engine.NopModelKey && idx.ModelInfo.Dim > 0
+	if !indexHasVectors {
+		if cfg.Mode == "semantic" {
+			return fmt.Errorf("index has no embeddings (built with --embedder none); semantic mode is unavailable. Use --mode bm25, or rebuild with an ONNX embedder.")
+		}
+		cfg.Mode = "bm25"
+	}
+
+	// All modes go through DispatchSearch so wikilink expansion runs
+	// uniformly. BM25 mode doesn't need an embedder (no qVec required);
+	// semantic and hybrid do, so we only load ONNX in those cases.
+	var qVec []float32
+	if cfg.Mode != "bm25" {
 		if err := engine.EnsureSetup(idx.ModelInfo.Key); err != nil {
 			return fmt.Errorf("setup: %w", err)
 		}
@@ -114,9 +136,9 @@ func runRecall(cmd *cobra.Command, args []string) error {
 			return err
 		}
 		defer emb.Close()
-		qVec := emb.Embed(query)
-		results = engine.DispatchSearch(idx, qVec, query, cfg)
+		qVec = emb.Embed(query)
 	}
+	results := engine.DispatchSearch(idx, qVec, query, cfg)
 
 	switch {
 	case recallFlags.jsonOut:
@@ -154,6 +176,9 @@ func init() {
 
 	f.IntVar(&recallFlags.nprobe, "nprobe", 0, "IVF probe count at query time (0 = index default)")
 	f.IntVar(&recallFlags.nsem, "n-semantic", 0, "IVF shortlist size fed into hybrid re-ranking (0 = auto)")
+
+	f.IntVar(&recallFlags.maxLinked, "max-linked", 3, "max wikilink-expanded chunks to add to results (0 = disable)")
+	f.BoolVar(&recallFlags.noLinks, "no-links", false, "disable wikilink expansion (shorthand for --max-linked=0)")
 
 	f.BoolVar(&recallFlags.jsonOut, "json", false, "emit JSON results to stdout")
 

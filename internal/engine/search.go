@@ -20,6 +20,12 @@ type SearchResult struct {
 	Body     string  `json:"body"`
 	Semantic float64 `json:"semantic,omitempty"`
 	BM25     float64 `json:"bm25,omitempty"`
+
+	// LinkedFrom is set for results surfaced via wikilink expansion
+	// (chunks reachable by 1 hop from a primary hit). Empty for
+	// primary hits. Present so hook-mode output can format them as
+	// "Related: …" headings and JSON consumers can tell them apart.
+	LinkedFrom string `json:"linked_from,omitempty"`
 }
 
 // ---------- semantic ----------
@@ -373,21 +379,119 @@ func BackendDescription(idx *Index, cfg QueryConfig) string {
 // path; otherwise they use brute-force. BM25 never changes. All
 // non-CLI callers (the tuner, the perf harness) should use this so a
 // single code path handles both backends.
+//
+// After primary results are selected, wikilink expansion adds up to
+// cfg.MaxLinked related chunks (1-hop from the primary hits).
 func DispatchSearch(idx *Index, qVec []float32, query string, cfg QueryConfig) []SearchResult {
+	var primary []SearchResult
 	switch cfg.Mode {
 	case "bm25":
-		return SearchBM25(idx, query, cfg)
+		primary = SearchBM25(idx, query, cfg)
 	case "semantic":
 		if idx.IVFIndex != nil {
-			return SearchSemanticIVF(idx, idx.IVFIndex, qVec, cfg)
+			primary = SearchSemanticIVF(idx, idx.IVFIndex, qVec, cfg)
+		} else {
+			primary = SearchSemantic(idx, qVec, cfg.K)
 		}
-		return SearchSemantic(idx, qVec, cfg.K)
 	default:
 		if idx.IVFIndex != nil {
-			return SearchHybridIVF(idx, idx.IVFIndex, qVec, query, cfg)
+			primary = SearchHybridIVF(idx, idx.IVFIndex, qVec, query, cfg)
+		} else {
+			primary = SearchHybrid(idx, qVec, query, cfg)
 		}
-		return SearchHybrid(idx, qVec, query, cfg)
 	}
+	if cfg.MaxLinked > 0 {
+		primary = expandLinks(idx, primary, cfg.MaxLinked)
+	}
+	return primary
+}
+
+// expandLinks appends up to maxAdd linked chunks to primary results,
+// following each primary hit's [[wikilinks]] one hop. Duplicates (a
+// link that already matches a primary hit) are skipped. Each added
+// result has LinkedFrom set to the file+title that sourced the link
+// so hook-mode output can group them and humans can trace provenance.
+func expandLinks(idx *Index, primary []SearchResult, maxAdd int) []SearchResult {
+	if maxAdd <= 0 || len(primary) == 0 {
+		return primary
+	}
+
+	// primaryChunk maps (File, Title) → chunk index so we can recover
+	// the exact chunk a primary hit came from (including its Links).
+	// A single file can contribute multiple chunks via heading split,
+	// and each section's Links are what we want to expand from.
+	primaryChunk := make(map[string]int, len(idx.Chunks))
+	for i, c := range idx.Chunks {
+		primaryChunk[c.File+"\x00"+c.Title] = i
+	}
+
+	// fileToChunk resolves a [[target]] string (a lowercase basename
+	// from extractLinks) to a representative chunk of that file. The
+	// first chunk of the file wins — typically the title or intro
+	// section, which is the most useful neighborhood context.
+	fileToChunk := make(map[string]int, len(idx.Chunks))
+	for i, c := range idx.Chunks {
+		key := normalizeLinkTarget(c.File)
+		if _, exists := fileToChunk[key]; !exists {
+			fileToChunk[key] = i
+		}
+	}
+
+	// Suppress duplicates: a linked file that's already a primary hit
+	// shouldn't be re-surfaced under Related.
+	alreadyPresent := make(map[string]struct{}, len(primary))
+	for _, r := range primary {
+		alreadyPresent[normalizeLinkTarget(r.File)] = struct{}{}
+	}
+
+	added := 0
+	out := primary
+	for _, r := range primary {
+		if added >= maxAdd {
+			break
+		}
+		srcIdx, ok := primaryChunk[r.File+"\x00"+r.Title]
+		if !ok {
+			continue
+		}
+		for _, target := range idx.Chunks[srcIdx].Links {
+			if added >= maxAdd {
+				break
+			}
+			if _, seen := alreadyPresent[target]; seen {
+				continue
+			}
+			chunkIdx, ok := fileToChunk[target]
+			if !ok {
+				continue
+			}
+			alreadyPresent[target] = struct{}{}
+			c := idx.Chunks[chunkIdx]
+			out = append(out, SearchResult{
+				File:       c.File,
+				Title:      c.Title,
+				Body:       c.Body,
+				LinkedFrom: r.File,
+			})
+			added++
+		}
+	}
+	return out
+}
+
+// normalizeLinkTarget strips directory and extension from a file path
+// and lowercases it. Matches the basename normalization extractLinks
+// uses on [[target]] values, so "docs/Apples.md", "Apples.md", and a
+// link [[apples]] all hash to the same key.
+func normalizeLinkTarget(s string) string {
+	base := s
+	if i := strings.LastIndexAny(s, "/\\"); i >= 0 {
+		base = s[i+1:]
+	}
+	if i := strings.LastIndex(base, "."); i > 0 {
+		base = base[:i]
+	}
+	return strings.ToLower(base)
 }
 
 // passesRelevanceGate applies the two-tier semantic floor from cfg.

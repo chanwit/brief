@@ -31,7 +31,9 @@ func isStdoutTTY() bool {
 
 // printHookOutput emits a <knowledge>...</knowledge> Markdown block
 // designed to be appended to an LLM's context by a UserPromptSubmit
-// hook. Truncates long bodies and caps total size.
+// hook. Truncates long bodies and caps total size. Results surfaced
+// via wikilink expansion are formatted under a "Related" prefix so
+// the LLM can tell primary hits from graph-neighborhood context.
 func printHookOutput(results []engine.SearchResult) {
 	if len(results) == 0 {
 		return
@@ -51,7 +53,13 @@ func printHookOutput(results []engine.SearchResult) {
 			}
 			body = body[:cut] + "\n…"
 		}
-		block := fmt.Sprintf("## %s — %s\n\n%s\n\n", r.File, r.Title, body)
+		var heading string
+		if r.LinkedFrom != "" {
+			heading = fmt.Sprintf("## Related · %s — %s (linked from %s)", r.File, r.Title, r.LinkedFrom)
+		} else {
+			heading = fmt.Sprintf("## %s — %s", r.File, r.Title)
+		}
+		block := heading + "\n\n" + body + "\n\n"
 		if used+len(block) > hookMaxTotalChars {
 			break
 		}
@@ -62,12 +70,19 @@ func printHookOutput(results []engine.SearchResult) {
 }
 
 // printHumanOutput emits the interactive banner + numbered ranked list.
+// Results surfaced via wikilink expansion are annotated with "(linked)".
 func printHumanOutput(idx *engine.Index, query string, cfg engine.QueryConfig, results []engine.SearchResult) {
 	fmt.Printf("%s results for: %s (model=%s backend=%s)\n\n",
 		cfg.Mode, query, idx.ModelInfo.Key, engine.BackendDescription(idx, cfg))
 	for i, r := range results {
-		switch cfg.Mode {
-		case "hybrid":
+		tag := ""
+		if r.LinkedFrom != "" {
+			tag = fmt.Sprintf(" (linked from %s)", r.LinkedFrom)
+		}
+		switch {
+		case r.LinkedFrom != "":
+			fmt.Printf("%d. [link] %s — %s%s\n", i+1, r.File, r.Title, tag)
+		case cfg.Mode == "hybrid":
 			fmt.Printf("%d. [%.4f sem=%.3f bm25=%.3f] %s — %s\n",
 				i+1, r.Score, r.Semantic, r.BM25, r.File, r.Title)
 		default:

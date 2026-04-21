@@ -20,6 +20,7 @@ var learnFlags struct {
 	output     string
 	configPath string
 	model      string
+	embedder   string
 
 	chunkStrategy string
 	chunkSize     int
@@ -107,6 +108,12 @@ func runLearn(cmd *cobra.Command, args []string) error {
 		cfg.Pooling = learnFlags.pooling
 	}
 
+	// --embedder overrides --model / --config for the embedder choice.
+	// "none" is the BM25-only mode: no ONNX download, no embedding.
+	if learnFlags.embedder == "none" {
+		cfg.ModelKey = engine.NopModelKey
+	}
+
 	info, err := engine.ResolveModel(cfg.ModelKey)
 	if err != nil {
 		return err
@@ -121,8 +128,12 @@ func runLearn(cmd *cobra.Command, args []string) error {
 	if err := engine.EnsureSetup(info.Key); err != nil {
 		return fmt.Errorf("setup: %w", err)
 	}
-	engine.InitORT()
-	defer ort.DestroyEnvironment()
+	// Skip ONNX runtime init entirely for the nop embedder — no
+	// library load, no process cost beyond argument parsing.
+	if info.Key != engine.NopModelKey {
+		engine.InitORT()
+		defer ort.DestroyEnvironment()
+	}
 	emb, err := engine.LoadEmbedder(info)
 	if err != nil {
 		return err
@@ -137,7 +148,10 @@ func runLearn(cmd *cobra.Command, args []string) error {
 	}
 
 	// IVF decision: --no-ivf > --use-ivf > auto-threshold.
+	// IVF requires vectors, so force off when the embedder is nop.
 	switch {
+	case info.Key == engine.NopModelKey:
+		cfg.UseIVF = false
 	case learnFlags.noIVF:
 		cfg.UseIVF = false
 	case learnFlags.useIVF:
@@ -190,6 +204,7 @@ func init() {
 	f.StringVarP(&learnFlags.output, "output", "o", "", "output index.json path (default: ./.brief/index.json)")
 	f.StringVar(&learnFlags.configPath, "config", "", "IndexConfig JSON; CLI flags override its values")
 	f.StringVar(&learnFlags.model, "model", "", "embedding model key (see `brief models`)")
+	f.StringVar(&learnFlags.embedder, "embedder", "onnx", "embedder backend: onnx | none (none = BM25-only, no ONNX download)")
 
 	f.StringVar(&learnFlags.chunkStrategy, "chunk-strategy", "", "heading | size")
 	f.IntVar(&learnFlags.chunkSize, "chunk-size", 0, "target chars per chunk (size strategy)")

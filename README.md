@@ -69,6 +69,23 @@ spare on every supported arch.
 - **Five models built in.** MiniLM L6/L12, BGE small/base, multi-qa
   MiniLM. `brief models` lists them; `--model KEY` switches.
   Adding a new ONNX model is one struct literal.
+- **Zero-ML mode.** `brief learn --embedder none` skips the embedder
+  entirely — no download, no ONNX init, index shrinks ~100×. BM25 +
+  wikilink expansion alone is surprisingly capable for well-linked
+  knowledge bases (Obsidian, Logseq, Foam vaults).
+
+### Knowledge graphs, not just documents
+
+`brief` parses Obsidian-style `[[wikilinks]]` during indexing. When
+recall returns a primary hit whose body links to other chunks, those
+linked chunks are surfaced as *Related* context (1-hop, capped at 3
+by default). Works with or without embeddings — human-curated links
+are themselves a retrieval signal, and often a stronger one than
+cosine similarity for well-maintained vaults.
+
+Supported link shapes: `[[target]]`, `[[target|display]]`,
+`[[target#heading]]`, `[[target#heading|display]]`. Targets resolve
+against file basenames (case-insensitive).
 
 ### UX that respects your time
 
@@ -269,6 +286,7 @@ brief learn \
   [ --from DIR ]                        # auto: $BRIEF_KNOWLEDGE → .claude/knowledge → knowledge → docs
   [ --output PATH ]                     # auto: ./.brief/index.json
   [ --model KEY ]                       # default all-MiniLM-L6-v2
+  [ --embedder onnx|none ]              # default onnx; "none" = BM25-only, no ONNX download
   [ --config INDEXCONFIG.json ]         # JSON config; flags override
   [ --chunk-strategy heading|size ]
   [ --chunk-size N ] [ --chunk-overlap N ]
@@ -292,6 +310,7 @@ brief recall \
   [ --semantic-hard-floor F ] [ --semantic-soft-floor F ]
   [ --bm25-min-for-soft-zone F ]
   [ --nprobe N ] [ --n-semantic N ]     # IVF only
+  [ --max-linked N ] [ --no-links ]     # wikilink expansion (default 3)
   [ --json ]
     "your question"
 ```

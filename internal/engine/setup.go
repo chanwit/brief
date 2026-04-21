@@ -72,8 +72,12 @@ func init() {
 
 // EnsureSetup makes sure the ONNX runtime library and the requested model
 // are available locally, downloading each on cache miss. Safe to call many
-// times.
+// times. No-op for the nop embedder — in BM25-only mode there's nothing
+// to install and nothing to download.
 func EnsureSetup(modelKey string) error {
+	if modelKey == NopModelKey {
+		return nil
+	}
 	if err := ensureORTLibrary(); err != nil {
 		return fmt.Errorf("onnx runtime library: %w", err)
 	}

@@ -10,10 +10,43 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 
 	"github.com/chanwit/brief/ivf"
 )
+
+// wikilinkRE matches Obsidian / Logseq / Foam style [[target]] and
+// [[target|display text]] references. The target group captures just
+// the link target (without the optional alias after |). Heading
+// anchors (#section) are stripped: [[Foo#Section]] → target "Foo".
+var wikilinkRE = regexp.MustCompile(`\[\[([^\]|#]+)(?:#[^\]|]*)?(?:\|[^\]]*)?\]\]`)
+
+// extractLinks returns the set of wikilink targets in text, normalized
+// to lowercase basenames (no extension) so they can match against
+// Chunk.File values during recall-time expansion. Duplicates removed,
+// order preserved on first occurrence.
+func extractLinks(text string) []string {
+	matches := wikilinkRE.FindAllStringSubmatch(text, -1)
+	if len(matches) == 0 {
+		return nil
+	}
+	seen := make(map[string]struct{}, len(matches))
+	out := make([]string, 0, len(matches))
+	for _, m := range matches {
+		target := strings.TrimSpace(m[1])
+		if target == "" {
+			continue
+		}
+		target = strings.ToLower(target)
+		if _, dup := seen[target]; dup {
+			continue
+		}
+		seen[target] = struct{}{}
+		out = append(out, target)
+	}
+	return out
+}
 
 // IndexSchemaVersion bumps whenever the on-disk layout changes in a way that
 // older binaries can't load. Queries refuse to run against a newer schema.
@@ -29,6 +62,11 @@ type Chunk struct {
 	Vector   []float32      `json:"vector,omitempty"`
 	TermFreq map[string]int `json:"tf"`
 	DocLen   int            `json:"doc_len"`
+	// Links holds Obsidian/wiki-style [[target]] references found in
+	// the body. Targets are normalized to the matching chunk's file
+	// name (basename without extension), so recall-time expansion can
+	// join against File without extra lookup tables.
+	Links []string `json:"links,omitempty"`
 }
 
 // Index is the serialized vector + BM25 store. ModelInfo and Config are
@@ -122,10 +160,11 @@ func SaveIndex(idx *Index, path string) error {
 	return os.WriteFile(path, data, 0o644)
 }
 
-// BuildIndex computes BM25 statistics and embeddings for every chunk and
-// returns a ready-to-serialize Index. Shared by cmdIndex, the tuner, and
-// tests so all three go through one code path.
-func BuildIndex(chunks []Chunk, emb *Embedder, cfg IndexConfig) *Index {
+// BuildIndex computes BM25 statistics and, if the embedder produces
+// vectors, embeddings for every chunk. Shared by cmdLearn, the tuner,
+// and tests so all three go through one code path. When emb is the
+// nop embedder, Vector stays nil and the resulting index is BM25-only.
+func BuildIndex(chunks []Chunk, emb Embedder, cfg IndexConfig) *Index {
 	docFreq := make(map[string]int)
 	totalLen := 0
 	for i := range chunks {
@@ -150,18 +189,20 @@ func BuildIndex(chunks []Chunk, emb *Embedder, cfg IndexConfig) *Index {
 		avgDocLen = float64(totalLen) / float64(len(chunks))
 	}
 
-	cap := cfg.EmbedMaxChars
-	for i := range chunks {
-		text := chunks[i].Title + "\n" + chunks[i].Body
-		if cap > 0 && len(text) > cap {
-			text = text[:cap]
+	if HasEmbeddings(emb) {
+		cap := cfg.EmbedMaxChars
+		for i := range chunks {
+			text := chunks[i].Title + "\n" + chunks[i].Body
+			if cap > 0 && len(text) > cap {
+				text = text[:cap]
+			}
+			chunks[i].Vector = emb.Embed(text)
 		}
-		chunks[i].Vector = emb.Embed(text)
 	}
 
 	return &Index{
 		Schema:    IndexSchemaVersion,
-		ModelInfo: emb.Info,
+		ModelInfo: emb.Info(),
 		Config:    cfg,
 		Chunks:    chunks,
 		DocFreq:   docFreq,
@@ -319,7 +360,7 @@ func splitSections(text, file string) []Chunk {
 			if len(body) > 0 || currentTitle != "" {
 				joined := strings.TrimSpace(strings.Join(body, "\n"))
 				if joined != "" {
-					chunks = append(chunks, Chunk{File: file, Title: currentTitle, Body: joined})
+					chunks = append(chunks, Chunk{File: file, Title: currentTitle, Body: joined, Links: extractLinks(joined)})
 				}
 			}
 			currentTitle = strings.TrimPrefix(line, "## ")
@@ -331,7 +372,7 @@ func splitSections(text, file string) []Chunk {
 	if len(body) > 0 {
 		joined := strings.TrimSpace(strings.Join(body, "\n"))
 		if joined != "" {
-			chunks = append(chunks, Chunk{File: file, Title: currentTitle, Body: joined})
+			chunks = append(chunks, Chunk{File: file, Title: currentTitle, Body: joined, Links: extractLinks(joined)})
 		}
 	}
 	return chunks
@@ -364,6 +405,7 @@ func splitBySize(text, file string, size, overlap int) []Chunk {
 				File:  file,
 				Title: fmt.Sprintf("chunk-%d", idx),
 				Body:  body,
+				Links: extractLinks(body),
 			})
 			idx++
 		}

@@ -27,7 +27,8 @@ Environment:
   BRIEF_KNOWLEDGE  default knowledge dir for learn
   ORT_LIB_PATH     full path to libonnxruntime shared library
   BRIEF_MODELS_DIR where per-model subdirs live`,
-	SilenceUsage: true,
+	SilenceUsage:  true,
+	SilenceErrors: true, // Execute() prints the error itself; suppress cobra's duplicate
 }
 
 // Execute runs the cobra tree. Called from main.main.
