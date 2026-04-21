@@ -96,13 +96,20 @@ reduce:
 	CBZ R2, done
 
 scalar:
-	FMOVS  (R0), F2
-	FMOVS  (R1), F3
-	FMADDS F3, F2, F0, F0      // F0 = F0 + F2 * F3
-	ADD    $4, R0, R0
-	ADD    $4, R1, R1
-	SUB    $1, R2, R2
-	CBNZ   R2, scalar
+	// FMULS+FADDS instead of FMADDS because Go's arm64 FMADDS argument
+	// order disagrees between the assembler's acceptance, the test file
+	// documented encoding, and objdump — which cost us a CI cycle.
+	// Two-instruction form is less clever but the operand conventions
+	// for FMULS and FADDS match FADDS/FMUL unambiguously: `Fm, Fn, Fd`
+	// → `Fd = Fn op Fm`.
+	FMOVS (R0), F2
+	FMOVS (R1), F3
+	FMULS F3, F2, F2           // F2 = F2 * F3 (= a[i]*b[i])
+	FADDS F2, F0, F0           // F0 = F0 + F2
+	ADD   $4, R0, R0
+	ADD   $4, R1, R1
+	SUB   $1, R2, R2
+	CBNZ  R2, scalar
 
 done:
 	FMOVS F0, ret+24(FP)
