@@ -48,10 +48,12 @@ format the LLM can read directly.
 | Semantic search via IVF-Flat  | ~6 µs           |
 | Full hybrid recall, end-to-end | **~15 ms**     |
 
-The IVF hot path runs through hand-written **AVX2** (amd64) and
-**NEON** (arm64) kernels — 8.6–9.6× faster than scalar Go on the
-dot-product primitive. Hook budgets are usually 50–200 ms; `brief`
-fits with headroom to spare.
+The IVF hot path runs through a hand-written **AVX2** (amd64) kernel —
+8.6–9.6× faster than scalar Go on the dot-product primitive. arm64
+currently uses Go's compiler-autovectorized scalar path (a proper NEON
+kernel is on the roadmap, pending Go toolchain support for 128-bit
+float vector ops). Hook budgets are usually 50–200 ms; `brief` fits
+with headroom to spare on every supported arch.
 
 ### Self-contained, batteries included
 
@@ -463,7 +465,9 @@ selected at init.
 
 Correctness is cross-validated against the scalar fallback on 21
 length classes that stress every tail path (`TestDotMatchesGeneric`).
-The arm64 NEON kernel shares that test on macOS and Linux CI runners.
+arm64 builds currently use the same scalar path as the reference, so
+the assertion is trivially true on Apple Silicon and Linux arm64 —
+but the test will catch any future arm64 asm kernel regression.
 
 ### Search latency (187-chunk technical-docs corpus)
 
@@ -535,9 +539,10 @@ candidate. `TestHybridGateAppliesBeforeTopK` locks that invariant.
 
 - **amd64**: AVX2 with two 8-float accumulators to break FMA latency,
   plus YMM/XMM tails and a scalar residue.
-- **arm64**: NEON with two 4-float accumulators, a 4-wide tail, and a
-  scalar residue. Unconditional install — NEON is in the ARMv8-A
-  baseline.
+- **arm64**: scalar Go (compiler-autovectorized). A hand-written NEON
+  kernel is deferred until Go's arm64 assembler supports 128-bit float
+  vector ops — `VFMLA`, `VFADD`, `VFMUL`, `VFADDP` currently only
+  encode the 64-bit `.S2` form. See `ivf/distance.go` for context.
 - **other**: pure-Go fallback validated by the same tests.
 
 ### Storage layout
@@ -590,12 +595,12 @@ go test -run='^$' -bench=Scenarios ./       # end-to-end search
 
 A 4-arch matrix runs on every push and pull request:
 
-| Runner             | GOOS/GOARCH     | SIMD kernel |
+| Runner             | GOOS/GOARCH     | Kernel      |
 |--------------------|-----------------|-------------|
 | `ubuntu-latest`    | `linux/amd64`   | AVX2        |
-| `ubuntu-24.04-arm` | `linux/arm64`   | NEON        |
+| `ubuntu-24.04-arm` | `linux/arm64`   | scalar      |
 | `macos-13`         | `darwin/amd64`  | AVX2        |
-| `macos-latest`     | `darwin/arm64`  | NEON        |
+| `macos-latest`     | `darwin/arm64`  | scalar      |
 
 Tagged releases build native tarballs on each runner and attach them
 to a GitHub Release with a `SHA256SUMS` manifest.

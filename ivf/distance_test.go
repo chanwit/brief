@@ -21,15 +21,12 @@ func TestActiveKernel(t *testing.T) {
 	t.Logf("active Dot kernel: %s  (GOOS=%s GOARCH=%s)", name, runtime.GOOS, runtime.GOARCH)
 
 	// Make the expectation explicit on known-accelerated targets so a CI
-	// regression (e.g. init ordering break) surfaces immediately.
+	// regression (e.g. init ordering break) surfaces immediately. arm64
+	// currently ships scalar — see distance.go for why.
 	switch runtime.GOARCH {
 	case "amd64":
 		if !isAccelerated(name) {
 			t.Fatalf("amd64 build dispatched to %s — AVX2 kernel not installed", name)
-		}
-	case "arm64":
-		if !isAccelerated(name) {
-			t.Fatalf("arm64 build dispatched to %s — NEON kernel not installed", name)
 		}
 	}
 }

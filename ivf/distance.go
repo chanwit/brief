@@ -13,8 +13,17 @@ package ivf
 // Dot returns the dot product of two equal-length float32 slices.
 //
 // It is a function variable so the amd64 build can replace it with an AVX2
-// kernel at init time (see distance_amd64.go). On architectures without an
-// accelerated kernel this stays as dotGeneric.
+// kernel at init time (see distance_amd64.go). On other architectures
+// (including arm64) this stays as dotGeneric.
+//
+// Why no arm64 NEON kernel: Go's arm64 assembler currently lacks
+// 128-bit (.S4 / .D2) encodings for VFMLA, VFMUL, VFADD, and VFADDP —
+// those are marked TODO in cmd/asm/internal/asm/testdata/arm64enc.s.
+// Only .S2 (64-bit half-vector) variants are implemented. A proper
+// NEON kernel is worth revisiting once Go ships .S4 encodings, or by
+// emitting WORD-encoded raw instructions. For now the scalar Go path
+// is Go's own compiler-vectorized baseline, which Apple Silicon in
+// particular handles well.
 var Dot func(a, b []float32) float32 = dotGeneric
 
 func dotGeneric(a, b []float32) float32 {
