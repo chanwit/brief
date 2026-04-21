@@ -73,19 +73,24 @@ reduce:
 	// each lane via the integer path:
 	//     VMOV Vn.S[i], Rk   (lane i → 32-bit GPR, bit-preserving)
 	//     FMOVS Rk, Fk       (GPR bits → FP register, bit-preserving)
-	// and accumulate with scalar FADDS.
+	//
+	// Critical: FMOVS to Sn zero-extends — writing to Sn clobbers the
+	// upper 96 bits of Vn. So we must extract ALL lanes to GPRs
+	// BEFORE any FMOVS, or the second VMOV reads a lane that was just
+	// wiped by the first FMOVS. That's a subtle correctness trap that
+	// cost us one CI cycle to find.
 	VMOV  V0.S[0], R3
-	FMOVS R3, F0
-	VMOV  V0.S[1], R3
-	FMOVS R3, F1
-	FADDS F1, F0, F0           // F0 = V0[0] + V0[1]
+	VMOV  V0.S[1], R4
+	VMOV  V1.S[0], R5
+	VMOV  V1.S[1], R6
 
-	VMOV  V1.S[0], R3
-	FMOVS R3, F2
-	FADDS F2, F0, F0
-	VMOV  V1.S[1], R3
-	FMOVS R3, F3
-	FADDS F3, F0, F0           // F0 = V0[0]+V0[1]+V1[0]+V1[1]
+	FMOVS R3, F0
+	FMOVS R4, F1
+	FADDS F1, F0, F0           // F0 = V0[0] + V0[1]
+	FMOVS R5, F1
+	FADDS F1, F0, F0
+	FMOVS R6, F1
+	FADDS F1, F0, F0           // F0 = V0[0]+V0[1]+V1[0]+V1[1]
 
 	// Scalar residue (0 or 1 leftover element).
 	CBZ R2, done
