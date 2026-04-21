@@ -20,9 +20,7 @@ jobs:
           - os: ubuntu-24.04-arm
             goos: linux
             goarch: arm64
-          - os: macos-13
-            goos: darwin
-            goarch: amd64
+          # darwin/amd64 intentionally omitted — see ci.yml for rationale.
           - os: macos-latest
             goos: darwin
             goarch: arm64

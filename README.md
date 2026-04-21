@@ -599,8 +599,11 @@ A 4-arch matrix runs on every push and pull request:
 |--------------------|-----------------|-------------|
 | `ubuntu-latest`    | `linux/amd64`   | AVX2        |
 | `ubuntu-24.04-arm` | `linux/arm64`   | scalar      |
-| `macos-13`         | `darwin/amd64`  | AVX2        |
 | `macos-latest`     | `darwin/arm64`  | scalar      |
+
+Intel-Mac (darwin/amd64) binaries aren't published — GitHub's `macos-13`
+Intel runners have queue times measured in hours. Build from source if
+you need one: `go install github.com/chanwit/brief@latest`.
 
 Tagged releases build native tarballs on each runner and attach them
 to a GitHub Release with a `SHA256SUMS` manifest.
