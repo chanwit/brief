@@ -48,12 +48,12 @@ format the LLM can read directly.
 | Semantic search via IVF-Flat  | ~6 µs           |
 | Full hybrid recall, end-to-end | **~15 ms**     |
 
-The IVF hot path runs through a hand-written **AVX2** (amd64) kernel —
-8.6–9.6× faster than scalar Go on the dot-product primitive. arm64
-currently uses Go's compiler-autovectorized scalar path (a proper NEON
-kernel is on the roadmap, pending Go toolchain support for 128-bit
-float vector ops). Hook budgets are usually 50–200 ms; `brief` fits
-with headroom to spare on every supported arch.
+The IVF hot path runs through hand-written **AVX2** (amd64) and
+**NEON** (arm64) kernels. The arm64 kernel is constrained to `.S2`
+operations by Go's assembler — it still gets meaningful ILP by
+running two independent `VFMLA.S2` accumulators in parallel. Hook
+budgets are usually 50–200 ms; `brief` fits with headroom to spare
+on every supported arch.
 
 ### Self-contained, batteries included
 
@@ -539,10 +539,12 @@ candidate. `TestHybridGateAppliesBeforeTopK` locks that invariant.
 
 - **amd64**: AVX2 with two 8-float accumulators to break FMA latency,
   plus YMM/XMM tails and a scalar residue.
-- **arm64**: scalar Go (compiler-autovectorized). A hand-written NEON
-  kernel is deferred until Go's arm64 assembler supports 128-bit float
-  vector ops — `VFMLA`, `VFADD`, `VFMUL`, `VFADDP` currently only
-  encode the 64-bit `.S2` form. See `ivf/distance.go` for context.
+- **arm64**: NEON with two `.S2` (2-float) accumulators for
+  instruction-level parallelism. The kernel is limited to the `.S2`
+  variant because Go's arm64 assembler only implements two vector
+  float mnemonics (`VFMLA`, `VFMLS`) and has no `VFADD` / `VADDP` at
+  any arrangement. Horizontal reduction uses `VMOV V.S[i], Rn` +
+  `FMOVS Rn, Fn` + scalar `FADDS`.
 - **other**: pure-Go fallback validated by the same tests.
 
 ### Storage layout
@@ -598,8 +600,8 @@ A 4-arch matrix runs on every push and pull request:
 | Runner             | GOOS/GOARCH     | Kernel      |
 |--------------------|-----------------|-------------|
 | `ubuntu-latest`    | `linux/amd64`   | AVX2        |
-| `ubuntu-24.04-arm` | `linux/arm64`   | scalar      |
-| `macos-latest`     | `darwin/arm64`  | scalar      |
+| `ubuntu-24.04-arm` | `linux/arm64`   | NEON (.S2)  |
+| `macos-latest`     | `darwin/arm64`  | NEON (.S2)  |
 
 Intel-Mac (darwin/amd64) binaries aren't published — GitHub's `macos-13`
 Intel runners have queue times measured in hours. Build from source if
