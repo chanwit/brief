@@ -9,6 +9,8 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/kljensen/snowball/english"
+
 	"github.com/chanwit/brief/ivf"
 )
 
@@ -72,8 +74,13 @@ func SearchSemantic(idx *Index, queryVec []float32, topK int) []SearchResult {
 
 // ---------- BM25 ----------
 
-// bm25Tokenize splits text into lowercase alphanumeric tokens (keeping '-' and '_').
-func bm25Tokenize(text string) []string {
+// bm25Tokenize splits text into lowercase alphanumeric tokens (keeping
+// '-' and '_'). When stem is true, each token is passed through an
+// English Porter2 stemmer so "refresh", "refreshes", "refreshing", and
+// "refreshed" all collapse to a single index key. Both the index build
+// and recall must agree on the stem flag; the value is persisted on
+// the index via IndexConfig.Stem and read back at query time.
+func bm25Tokenize(text string, stem bool) []string {
 	text = strings.ToLower(text)
 	var tokens []string
 	var current []rune
@@ -82,19 +89,65 @@ func bm25Tokenize(text string) []string {
 			current = append(current, r)
 		} else {
 			if len(current) > 1 {
-				tokens = append(tokens, string(current))
+				tokens = append(tokens, maybeStem(string(current), stem))
 			}
 			current = nil
 		}
 	}
 	if len(current) > 1 {
-		tokens = append(tokens, string(current))
+		tokens = append(tokens, maybeStem(string(current), stem))
 	}
 	return tokens
 }
 
-func bm25ChunkScore(idx *Index, queryTerms []string, chunk *Chunk, k1, b float64) float64 {
+// chunkMatchesTagFilter reports whether c should be considered for
+// scoring given the caller's required-tag set. An empty required set
+// lets every chunk through. A non-empty required set passes only
+// chunks whose Tags contain at least one of the required values —
+// i.e. set intersection, not subset. Chunks without any tags are
+// excluded when a filter is active.
+func chunkMatchesTagFilter(c *Chunk, required []string) bool {
+	if len(required) == 0 {
+		return true
+	}
+	for _, want := range required {
+		for _, have := range c.Tags {
+			if have == want {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// maybeStem runs the Snowball English stemmer on a token when stem is
+// true. Tokens with digits or dashes are passed through unchanged —
+// those are identifiers (version numbers, CLI flags, CamelCase-ish
+// terms) where stemming would do more harm than good.
+func maybeStem(tok string, stem bool) string {
+	if !stem {
+		return tok
+	}
+	for _, r := range tok {
+		if r == '-' || r == '_' || (r >= '0' && r <= '9') {
+			return tok
+		}
+	}
+	return english.Stem(tok, false)
+}
+
+// bm25ChunkScore runs the BM25 scoring formula against one chunk with
+// an optional BM25F-style title boost. cfg.TitleBoost=1 reduces to
+// vanilla BM25; higher values add extra weight to terms that also
+// appear in the chunk's title/aliases (via TitleTermFreq). Chunks
+// from indexes built before TitleTermFreq existed get no boost —
+// the map lookup returns zero, which collapses the second term.
+func bm25ChunkScore(idx *Index, queryTerms []string, chunk *Chunk, cfg QueryConfig) float64 {
 	n := float64(len(idx.Chunks))
+	boost := cfg.TitleBoost
+	if boost < 1 {
+		boost = 1
+	}
 	score := 0.0
 	for _, qt := range queryTerms {
 		df := float64(idx.DocFreq[qt])
@@ -102,17 +155,19 @@ func bm25ChunkScore(idx *Index, queryTerms []string, chunk *Chunk, k1, b float64
 			continue
 		}
 		tf := float64(chunk.TermFreq[qt])
+		if extra := float64(chunk.TitleTermFreq[qt]); extra > 0 {
+			tf += (boost - 1) * extra
+		}
 		idf := math.Log((n-df+0.5)/(df+0.5) + 1.0)
 		dl := float64(chunk.DocLen)
-		tfNorm := (tf * (k1 + 1)) / (tf + k1*(1-b+b*dl/idx.AvgDocLen))
+		tfNorm := (tf * (cfg.BM25K1 + 1)) / (tf + cfg.BM25K1*(1-cfg.BM25B+cfg.BM25B*dl/idx.AvgDocLen))
 		score += idf * tfNorm
 	}
 	return score
 }
 
 func SearchBM25(idx *Index, query string, cfg QueryConfig) []SearchResult {
-	queryTerms := bm25Tokenize(query)
-	k1, b := cfg.BM25K1, cfg.BM25B
+	queryTerms := bm25Tokenize(query, idx.Config.Stem)
 	topK := cfg.K
 
 	type scored struct {
@@ -121,7 +176,10 @@ func SearchBM25(idx *Index, query string, cfg QueryConfig) []SearchResult {
 	}
 	var results []scored
 	for i := range idx.Chunks {
-		score := bm25ChunkScore(idx, queryTerms, &idx.Chunks[i], k1, b)
+		if !chunkMatchesTagFilter(&idx.Chunks[i], cfg.RequireTags) {
+			continue
+		}
+		score := bm25ChunkScore(idx, queryTerms, &idx.Chunks[i], cfg)
 		if score > 0 {
 			results = append(results, scored{score, i})
 		}
@@ -144,7 +202,7 @@ func SearchBM25(idx *Index, query string, cfg QueryConfig) []SearchResult {
 // ---------- hybrid ----------
 
 func SearchHybrid(idx *Index, queryVec []float32, query string, cfg QueryConfig) []SearchResult {
-	queryTerms := bm25Tokenize(query)
+	queryTerms := bm25Tokenize(query, idx.Config.Stem)
 
 	// Domain relevance gate.
 	corpusHits := 0
@@ -179,8 +237,15 @@ func SearchHybrid(idx *Index, queryVec []float32, query string, cfg QueryConfig)
 	for i := range idx.Chunks {
 		c := &idx.Chunks[i]
 		scores[i].idx = i
+		if !chunkMatchesTagFilter(c, cfg.RequireTags) {
+			// Mark as excluded by giving it unreachable scores.
+			// Using -1 for semantic ensures it fails the relevance
+			// gate without a special-case branch.
+			scores[i].semantic = -1
+			continue
+		}
 		scores[i].semantic = cosineSim(queryVec, c.Vector)
-		scores[i].bm25Raw = bm25ChunkScore(idx, queryTerms, c, cfg.BM25K1, cfg.BM25B)
+		scores[i].bm25Raw = bm25ChunkScore(idx, queryTerms, c, cfg)
 		if scores[i].bm25Raw > maxBM25 {
 			maxBM25 = scores[i].bm25Raw
 		}
@@ -270,7 +335,7 @@ func SearchSemanticIVF(idx *Index, IVFIndex *ivf.IVFFlat, queryVec []float32, cf
 // Chunks not in the IVF shortlist get semantic=0, so their combined score
 // is BM25-only; the relevance gate then decides whether they survive.
 func SearchHybridIVF(idx *Index, IVFIndex *ivf.IVFFlat, queryVec []float32, query string, cfg QueryConfig) []SearchResult {
-	queryTerms := bm25Tokenize(query)
+	queryTerms := bm25Tokenize(query, idx.Config.Stem)
 
 	// Relevance gate on query terms (same as brute-force path).
 	corpusHits := 0
@@ -315,7 +380,10 @@ func SearchHybridIVF(idx *Index, IVFIndex *ivf.IVFFlat, queryVec []float32, quer
 	scores := make([]scored, 0, len(semanticByChunk)+64)
 	maxBM25 := 0.0
 	for i := range idx.Chunks {
-		bm := bm25ChunkScore(idx, queryTerms, &idx.Chunks[i], cfg.BM25K1, cfg.BM25B)
+		if !chunkMatchesTagFilter(&idx.Chunks[i], cfg.RequireTags) {
+			continue
+		}
+		bm := bm25ChunkScore(idx, queryTerms, &idx.Chunks[i], cfg)
 		if bm > maxBM25 {
 			maxBM25 = bm
 		}

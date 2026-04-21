@@ -76,16 +76,27 @@ spare on every supported arch.
 
 ### Knowledge graphs, not just documents
 
-`brief` parses Obsidian-style `[[wikilinks]]` during indexing. When
-recall returns a primary hit whose body links to other chunks, those
-linked chunks are surfaced as *Related* context (1-hop, capped at 3
-by default). Works with or without embeddings — human-curated links
-are themselves a retrieval signal, and often a stronger one than
-cosine similarity for well-maintained vaults.
+`brief` treats Obsidian-style vaults as first-class input. Everything
+works with or without an embedder, so you can run the whole stack
+BM25-only and still get high-quality retrieval.
 
-Supported link shapes: `[[target]]`, `[[target|display]]`,
-`[[target#heading]]`, `[[target#heading|display]]`. Targets resolve
-against file basenames (case-insensitive).
+- **`[[wikilinks]]` as retrieval edges.** Links in a chunk's body are
+  parsed during indexing; at recall time, 1-hop neighborhoods of the
+  top hits are surfaced as *Related* context (capped at 3 by default).
+  Supported shapes: `[[target]]`, `[[target|display]]`,
+  `[[target#heading]]`, `[[target#heading|display]]`.
+- **YAML frontmatter** (`title`, `aliases`, `tags`) is recognized and
+  respected. `aliases` get the same scoring weight as title terms
+  (so a query for `"divergence"` finds a note aliased to it). `tags`
+  become a filter knob: `brief recall --tag kubernetes "scale pods"`.
+- **BM25F title boost.** Section titles count more than body matches
+  by a configurable multiplier (`--title-boost`, default 2.5). The
+  tuner can optimize it against your eval set.
+- **Porter2 English stemming** (`brief learn --stem`) collapses
+  inflections — `refresh`, `refreshing`, `refreshed`, `refreshes`
+  all match one index key. Off by default; flip on for English
+  prose corpora. Identifier-looking tokens (with digits or dashes)
+  pass through unstemmed.
 
 ### UX that respects your time
 
@@ -295,6 +306,8 @@ brief learn \
   [ --exclude  "drafts/*" ]
   [ --use-ivf | --no-ivf ]              # default: auto at chunks ≥ --auto-ivf-threshold (5000)
   [ --ivf-centroids K ] [ --ivf-nprobe N ]
+  [ --stem ]                            # Porter2 English stemming on BM25 tokens (default off)
+  [ --no-frontmatter ]                  # skip YAML frontmatter parsing (default: parse)
 ```
 
 ### `recall`
@@ -311,6 +324,8 @@ brief recall \
   [ --bm25-min-for-soft-zone F ]
   [ --nprobe N ] [ --n-semantic N ]     # IVF only
   [ --max-linked N ] [ --no-links ]     # wikilink expansion (default 3)
+  [ --title-boost F ]                   # BM25F title multiplier (default 2.5)
+  [ --tag TAG ]                         # narrow search to chunks with this tag (repeatable)
   [ --json ]
     "your question"
 ```

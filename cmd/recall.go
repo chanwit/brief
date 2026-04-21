@@ -36,6 +36,9 @@ var recallFlags struct {
 	maxLinked int
 	noLinks   bool
 
+	titleBoost float64
+	tags       []string
+
 	jsonOut bool
 }
 
@@ -108,6 +111,12 @@ func runRecall(cmd *cobra.Command, args []string) error {
 	if recallFlags.noLinks {
 		cfg.MaxLinked = 0
 	}
+	if cmd.Flags().Changed("title-boost") {
+		cfg.TitleBoost = recallFlags.titleBoost
+	}
+	if len(recallFlags.tags) > 0 {
+		cfg.RequireTags = recallFlags.tags
+	}
 
 	// An index built with --embedder none has no vectors. Downgrade
 	// semantic/hybrid to BM25 silently (and skip all ONNX init) so
@@ -179,6 +188,9 @@ func init() {
 
 	f.IntVar(&recallFlags.maxLinked, "max-linked", 3, "max wikilink-expanded chunks to add to results (0 = disable)")
 	f.BoolVar(&recallFlags.noLinks, "no-links", false, "disable wikilink expansion (shorthand for --max-linked=0)")
+
+	f.Float64Var(&recallFlags.titleBoost, "title-boost", 2.5, "BM25F title-field multiplier (1 = vanilla BM25)")
+	f.StringSliceVar(&recallFlags.tags, "tag", nil, "filter to chunks with one of these tags (repeatable; ORed)")
 
 	f.BoolVar(&recallFlags.jsonOut, "json", false, "emit JSON results to stdout")
 

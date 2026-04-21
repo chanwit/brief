@@ -290,7 +290,7 @@ func TestHybridGateAppliesBeforeTopK(t *testing.T) {
 	keeperBody := "ordinary ordinary words"
 
 	mkChunk := func(file, body string, vec []float32) Chunk {
-		terms := bm25Tokenize(body)
+		terms := bm25Tokenize(body, false)
 		tf := make(map[string]int)
 		for _, tok := range terms {
 			tf[tok]++

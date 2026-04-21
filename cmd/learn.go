@@ -38,6 +38,9 @@ var learnFlags struct {
 	ivfCentroids     int
 	ivfIters         int
 	ivfNprobe        int
+
+	stem            bool
+	noFrontmatter   bool
 }
 
 var learnCmd = &cobra.Command{
@@ -106,6 +109,12 @@ func runLearn(cmd *cobra.Command, args []string) error {
 	}
 	if learnFlags.pooling != "" {
 		cfg.Pooling = learnFlags.pooling
+	}
+	if cmd.Flags().Changed("stem") {
+		cfg.Stem = learnFlags.stem
+	}
+	if learnFlags.noFrontmatter {
+		cfg.ParseFrontmatter = false
 	}
 
 	// --embedder overrides --model / --config for the embedder choice.
@@ -215,6 +224,8 @@ func init() {
 	f.StringVar(&learnFlags.include, "include", "", "comma-separated file globs (e.g. '*.md,*.txt')")
 	f.StringVar(&learnFlags.exclude, "exclude", "", "comma-separated file globs to exclude")
 	f.StringVar(&learnFlags.pooling, "pooling", "", "override pooling: mean | cls")
+	f.BoolVar(&learnFlags.stem, "stem", false, "stem BM25 tokens with Porter2 English (boosts recall on inflected queries)")
+	f.BoolVar(&learnFlags.noFrontmatter, "no-frontmatter", false, "skip YAML frontmatter parsing (title/aliases/tags)")
 
 	f.BoolVar(&learnFlags.useIVF, "use-ivf", false, "force IVF-Flat ANN companion")
 	f.BoolVar(&learnFlags.noIVF, "no-ivf", false, "disable IVF even when auto-threshold would enable it")

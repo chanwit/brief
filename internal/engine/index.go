@@ -62,6 +62,17 @@ type Chunk struct {
 	Vector   []float32      `json:"vector,omitempty"`
 	TermFreq map[string]int `json:"tf"`
 	DocLen   int            `json:"doc_len"`
+	// TitleTermFreq holds the BM25 term counts for the TITLE portion
+	// of this chunk only (also any aliases from the file's
+	// frontmatter). Used at query time to give title/alias hits a
+	// configurable boost (QueryConfig.TitleBoost). Absent on indexes
+	// built before v0.3 — scoring treats nil as zero boost, which is
+	// why old indexes keep working unchanged.
+	TitleTermFreq map[string]int `json:"title_tf,omitempty"`
+	// Tags holds every tag assigned to this chunk — sourced from
+	// YAML frontmatter on its file (when ParseFrontmatter is on).
+	// Recall can filter by tag via QueryConfig.RequireTags.
+	Tags []string `json:"tags,omitempty"`
 	// Links holds Obsidian/wiki-style [[target]] references found in
 	// the body. Targets are normalized to the matching chunk's file
 	// name (basename without extension), so recall-time expansion can
@@ -168,13 +179,19 @@ func BuildIndex(chunks []Chunk, emb Embedder, cfg IndexConfig) *Index {
 	docFreq := make(map[string]int)
 	totalLen := 0
 	for i := range chunks {
-		terms := bm25Tokenize(chunks[i].Title + "\n" + chunks[i].Body)
-		chunks[i].DocLen = len(terms)
-		totalLen += len(terms)
+		// Tokenize title and body separately so BM25F can apply a
+		// configurable boost to title matches at query time. The
+		// combined TermFreq is what vanilla BM25 uses; TitleTermFreq
+		// is the subset also found in the title field.
+		titleTerms := bm25Tokenize(chunks[i].Title, cfg.Stem)
+		bodyTerms := bm25Tokenize(chunks[i].Body, cfg.Stem)
+		allTerms := append(titleTerms, bodyTerms...)
+		chunks[i].DocLen = len(allTerms)
+		totalLen += len(allTerms)
 
 		tf := make(map[string]int)
 		seen := make(map[string]bool)
-		for _, t := range terms {
+		for _, t := range allTerms {
 			tf[t]++
 			if !seen[t] {
 				docFreq[t]++
@@ -182,6 +199,14 @@ func BuildIndex(chunks []Chunk, emb Embedder, cfg IndexConfig) *Index {
 			}
 		}
 		chunks[i].TermFreq = tf
+
+		if len(titleTerms) > 0 {
+			titleTF := make(map[string]int, len(titleTerms))
+			for _, t := range titleTerms {
+				titleTF[t]++
+			}
+			chunks[i].TitleTermFreq = titleTF
+		}
 	}
 
 	avgDocLen := 0.0
@@ -272,6 +297,29 @@ func BuildIVFFromIndex(idx *Index, dir string, cfg IndexConfig) (*ivf.IVFFlat, e
 	return ix, nil
 }
 
+// applyFrontmatter mutates sections in place with metadata extracted
+// from the file's YAML frontmatter. Title override replaces only the
+// first (root) section's title — the one derived from the filename.
+// Aliases are appended to the root section's Title so they end up in
+// TitleTermFreq at build time; they're harmless visually. Tags go on
+// every section from this file, since frontmatter tags are a
+// file-level concept.
+func applyFrontmatter(sections []Chunk, fm frontmatter) {
+	if fm.Title != "" {
+		sections[0].Title = fm.Title
+	}
+	if len(fm.Aliases) > 0 {
+		// " · aliases: a, b" keeps the human-readable Title and
+		// lets BM25 tokenize the alias words into TitleTermFreq.
+		sections[0].Title += " · aliases: " + strings.Join(fm.Aliases, ", ")
+	}
+	if len(fm.Tags) > 0 {
+		for i := range sections {
+			sections[i].Tags = append(sections[i].Tags, fm.Tags...)
+		}
+	}
+}
+
 // StripChunkVectors drops every chunk's Vector slice so the JSON stays
 // small. Used right before saving when UseIVF=true.
 func StripChunkVectors(idx *Index) {
@@ -304,12 +352,33 @@ func ParseKnowledge(dir string, cfg IndexConfig) []Chunk {
 		if err != nil {
 			return nil
 		}
+
+		// Optional YAML frontmatter: peeled off before chunking so
+		// the fenced block doesn't bleed into a chunk body. Its
+		// title/aliases/tags are attached to every chunk from this
+		// file below.
+		var fm frontmatter
+		text := string(data)
+		if cfg.ParseFrontmatter {
+			fm, text = parseFrontmatter(text)
+		}
+
 		var sections []Chunk
 		switch cfg.ChunkStrategy {
 		case "size":
-			sections = splitBySize(string(data), rel, cfg.ChunkSize, cfg.ChunkOverlap)
+			sections = splitBySize(text, rel, cfg.ChunkSize, cfg.ChunkOverlap)
 		default:
-			sections = splitSections(string(data), rel)
+			sections = splitSections(text, rel)
+		}
+		// Apply frontmatter metadata to every chunk derived from
+		// this file. The title override only replaces the default
+		// filename-derived title on the ROOT chunk (the pre-first-
+		// heading content or the single chunk of a fileless doc),
+		// matching what a human reader would expect. Aliases are
+		// added to the root chunk's title text so they get the
+		// TitleBoost at recall. Tags apply to every section.
+		if len(sections) > 0 {
+			applyFrontmatter(sections, fm)
 		}
 		for _, s := range sections {
 			if cfg.MinChunkChars > 0 && len(s.Body) < cfg.MinChunkChars {

@@ -33,6 +33,23 @@ type IndexConfig struct {
 	IVFCentroids int  `json:"ivf_centroids,omitempty"` // 0 = auto: max(16, 4√N)
 	IVFKmeansIt  int  `json:"ivf_kmeans_iters,omitempty"` // 0 = 20
 	IVFNprobe    int  `json:"ivf_nprobe,omitempty"` // default probe count baked into the IVF manifest; 0 = auto
+
+	// Stem runs every BM25 token through a Porter2 English stemmer at
+	// both index and query time so "refresh", "refreshing", and
+	// "refreshed" collapse to one key. Off by default — flipping it
+	// can subtly change retrieval on non-English or heavily
+	// identifier-based corpora. Must match between learn and recall;
+	// the value is read back from the loaded index.
+	Stem bool `json:"stem,omitempty"`
+
+	// ParseFrontmatter tells the chunker to read a leading
+	//   ---\n<yaml>\n---\n
+	// block from each markdown file, using `title` as the root
+	// section title, folding `aliases` into the chunk's title terms
+	// (so they get TitleBoost at recall), and assigning `tags` to
+	// every chunk from that file. Default true; set to false to
+	// treat frontmatter-ish text as regular body content.
+	ParseFrontmatter bool `json:"parse_frontmatter,omitempty"`
 }
 
 func DefaultIndexConfig() IndexConfig {
@@ -46,6 +63,14 @@ func DefaultIndexConfig() IndexConfig {
 		EmbedMaxChars: 1500,
 		Include:       []string{"*.md", "*.markdown", "*.txt"},
 		Exclude:       nil,
+		// Stemming defaults off: safe for all corpora, opt-in lift
+		// for English prose. Set to true in IndexConfig JSON or via
+		// --stem at learn time.
+		Stem: false,
+		// Frontmatter parsing on by default. Files without a leading
+		// --- YAML --- block are parsed normally, so this is a no-op
+		// for non-Obsidian corpora.
+		ParseFrontmatter: true,
 	}
 }
 
@@ -78,6 +103,21 @@ type QueryConfig struct {
 	// MaxLinked caps the total number of linked chunks added across
 	// all primary hits. 0 disables the expansion entirely.
 	MaxLinked int `json:"max_linked,omitempty"`
+
+	// TitleBoost multiplies the effective term frequency for terms
+	// that appear in a chunk's title (or in a frontmatter alias).
+	// Effective tf = TermFreq[t] + (TitleBoost-1) * TitleTermFreq[t],
+	// so TitleBoost=1 reduces to vanilla BM25 and higher values
+	// progressively privilege title/alias hits. Default ~2.5 on new
+	// indexes; has no effect on indexes that don't carry
+	// TitleTermFreq (pre-v0.3).
+	TitleBoost float64 `json:"title_boost,omitempty"`
+
+	// RequireTags filters the search space to chunks whose Tags field
+	// contains at least one of these values. Empty disables filtering.
+	// Useful when an agent knows the domain of the user's question
+	// and wants to narrow retrieval to one section of the vault.
+	RequireTags []string `json:"require_tags,omitempty"`
 }
 
 // DefaultQueryConfig returns the baked-in best-known hybrid hyperparameters.
@@ -118,6 +158,10 @@ func DefaultQueryConfig() QueryConfig {
 		// Small enough to keep hook-mode output bounded, big enough to
 		// catch the most-referenced notes in a small Obsidian vault.
 		MaxLinked: 3,
+		// Title hits count 2.5× body hits. Gentle enough to never
+		// hurt, strong enough to visibly help on corpora with
+		// informative section titles.
+		TitleBoost: 2.5,
 	}
 }
 
