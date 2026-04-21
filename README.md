@@ -48,12 +48,12 @@ format the LLM can read directly.
 | Semantic search via IVF-Flat  | ~6 µs           |
 | Full hybrid recall, end-to-end | **~15 ms**     |
 
-The IVF hot path runs through hand-written **AVX2** (amd64) and
-**NEON** (arm64) kernels. The arm64 kernel is constrained to `.S2`
-operations by Go's assembler — it still gets meaningful ILP by
-running two independent `VFMLA.S2` accumulators in parallel. Hook
-budgets are usually 50–200 ms; `brief` fits with headroom to spare
-on every supported arch.
+The IVF hot path runs through hand-written **AVX2** (amd64, ~13×
+over scalar Go) and **NEON** (arm64, ~3×) dot-product kernels. The
+arm64 kernel is constrained to `.S2` operations by Go's assembler but
+still gets meaningful ILP from two independent `VFMLA.S2` accumulators.
+Hook budgets are usually 50–200 ms; `brief` fits with headroom to
+spare on every supported arch.
 
 ### Self-contained, batteries included
 
@@ -451,23 +451,45 @@ in `relevant_titles`.
 
 ## Performance
 
-All numbers from a 13th-gen Intel i5-1335U (12 threads, AVX2).
-
 ### SIMD dot product
 
 The IVF search hot path routes through a hand-written assembly kernel
-selected at init.
+selected at init. Numbers below come from `go test -bench=Dot` on
+GitHub Actions CI runners (5 runs per bench, medians shown); raw
+output is produced by the `Bench` workflow which you can re-dispatch
+at any time.
 
-| Dim | Scalar Go | AVX2 kernel | Speedup |
+**linux/amd64** (GitHub standard runner, AVX2):
+
+| Dim | Scalar Go | AVX2 kernel | Speedup  |
+|-----|-----------|-------------|----------|
+| 384 | 331 ns    | 26 ns       | **12.6×** |
+| 768 | 690 ns    | 49 ns       | **14.1×** |
+
+**linux/arm64** (GitHub Graviton runner, NEON `.S2`):
+
+| Dim | Scalar Go | NEON kernel | Speedup |
 |-----|-----------|-------------|---------|
-| 384 | 150 ns    | 17 ns       | **8.6×** |
-| 768 | 321 ns    | 33 ns       | **9.6×** |
+| 384 | 221 ns    | 72 ns       | **3.08×** |
+| 768 | 451 ns    | 140 ns      | **3.23×** |
+
+**darwin/arm64** (GitHub Apple Silicon runner, NEON `.S2`):
+
+| Dim | Scalar Go | NEON kernel | Speedup |
+|-----|-----------|-------------|---------|
+| 384 | 405 ns    | 135 ns      | **3.00×** |
+| 768 | 887 ns    | 258 ns      | **3.44×** |
+
+The NEON speedup is lower than AVX2 because Go's arm64 assembler only
+implements vector float ops at `.S2` (64-bit, 2 floats/op) — not the
+full `.S4` (128-bit, 4 floats/op) arrangement. Even so, the kernel
+processes 4 floats per main-loop iteration via two independent
+`VFMLA.S2` accumulators, and the measured 3× matches what that
+ILP-with-half-width-SIMD should yield.
 
 Correctness is cross-validated against the scalar fallback on 21
-length classes that stress every tail path (`TestDotMatchesGeneric`).
-arm64 builds currently use the same scalar path as the reference, so
-the assertion is trivially true on Apple Silicon and Linux arm64 —
-but the test will catch any future arm64 asm kernel regression.
+length classes that stress every tail path (`TestDotMatchesGeneric`)
+on every CI run.
 
 ### Search latency (187-chunk technical-docs corpus)
 
