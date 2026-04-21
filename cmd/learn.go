@@ -117,6 +117,16 @@ func runLearn(cmd *cobra.Command, args []string) error {
 		cfg.ParseFrontmatter = false
 	}
 
+	// Mode-conditional default: --embedder none enables stemming
+	// unless the user explicitly said otherwise. Rationale — nop-
+	// mode's dominant audience is prose-heavy Obsidian vaults where
+	// Porter2 English stemming consistently improves recall. The
+	// ONNX path keeps its stem=off default since the embedder
+	// already handles morphology. Fully overridable via --stem=false.
+	if learnFlags.embedder == "none" && !cmd.Flags().Changed("stem") {
+		cfg.Stem = true
+	}
+
 	// --embedder overrides --model / --config for the embedder choice.
 	// "none" is the BM25-only mode: no ONNX download, no embedding.
 	if learnFlags.embedder == "none" {

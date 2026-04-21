@@ -113,6 +113,14 @@ func runRecall(cmd *cobra.Command, args []string) error {
 	}
 	if cmd.Flags().Changed("title-boost") {
 		cfg.TitleBoost = recallFlags.titleBoost
+	} else if idx.ModelInfo.Key == engine.NopModelKey {
+		// Mode-conditional default: nop-mode indexes (built with
+		// --embedder none) usually also enabled stemming, which
+		// reshapes BM25 term frequencies slightly. Dropping the
+		// title-boost default from 2.5 → 2.0 widens the safe zone
+		// where retrieval hits perfect recall on realistic queries.
+		// User-supplied --title-boost wins.
+		cfg.TitleBoost = 2.0
 	}
 	if len(recallFlags.tags) > 0 {
 		cfg.RequireTags = recallFlags.tags

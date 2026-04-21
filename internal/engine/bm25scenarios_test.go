@@ -85,6 +85,52 @@ func TestBM25OnlyScenariosHitRate(t *testing.T) {
 	}
 }
 
+// TestBM25OnlyNopDefaultsScenarios measures the configuration the CLI
+// auto-applies when the user runs `brief learn --embedder none` with
+// no other flags: stemming enabled + title-boost lowered to 2.0.
+// This is the mode-conditional default the CLI wires up, and this
+// test asserts that at the engine layer those settings together
+// still reach perfect recall on the scenarios eval set — the whole
+// point of flipping the default.
+func TestBM25OnlyNopDefaultsScenarios(t *testing.T) {
+	kdir, err := locatePerfCorpus()
+	if err != nil {
+		t.Skipf("scenarios corpus unavailable: %v", err)
+	}
+
+	// Replicate what cmd/learn.go does when --embedder none is
+	// passed without --stem/--title-boost overrides.
+	cfg := DefaultIndexConfig()
+	cfg.ModelKey = NopModelKey
+	cfg.Include = []string{"*.md"}
+	cfg.Stem = true // CLI auto-flip
+
+	emb, _ := LoadEmbedder(nopModelInfo)
+	defer emb.Close()
+	idx := BuildIndex(ParseKnowledge(kdir, cfg), emb, cfg)
+
+	qCfg := DefaultQueryConfig()
+	qCfg.Mode = "bm25"
+	qCfg.K = 5
+	qCfg.TitleBoost = 2.0 // CLI auto-lower
+
+	hits := 0
+	for _, q := range perfQueries {
+		if topHitsAny(DispatchSearch(idx, nil, q.query, qCfg), q.want) {
+			hits++
+		}
+	}
+	total := len(perfQueries)
+	t.Logf("BM25 nop-mode defaults (stem=on, TitleBoost=2.0) hit@5: %d/%d = %.3f",
+		hits, total, float64(hits)/float64(total))
+	// Current reading is 18/18 and the whole reason for flipping
+	// these defaults is to reach that number. Floor at 17/18 gives
+	// one query of noise tolerance.
+	if hits < 17 {
+		t.Fatalf("nop-mode default hit@5 = %d/%d, expected ≥ 17/%d", hits, total, total)
+	}
+}
+
 // TestBM25OnlyWithStemmingScenarios runs the same experiment with
 // stemming on. On the scenarios corpus specifically, stemming doesn't
 // help — the corpus is identifier-heavy (YAML fields, tool names,
